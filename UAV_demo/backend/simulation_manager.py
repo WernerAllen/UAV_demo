@@ -1,10 +1,11 @@
 # 文件: backend/simulation_manager.py
-# 描述: 编排所有模块，管理实时仿真的状态和流程 (已修复随机性问题)
+# 描述: 编排所有模块，管理实时仿真的状态和流程 (已更新为Dijkstra寻路算法)
 
 from collections import deque
 import random
 import math
-import os # 导入os模块以使用强随机源
+import os
+import heapq # 导入heapq以实现优先队列
 from core.uav import UAV
 from core.packet import Packet
 from mac_layer.mac import MACLayer
@@ -24,10 +25,7 @@ class SimulationManager:
         self.last_uav_count = DEFAULT_NUM_UAVS
 
     def start_simulation(self, num_uavs=None):
-        # ## **** BUG FIX (V2): 使用操作系统强随机源 **** ##
-        # 此方法确保即使在极短时间内连续调用，也能获得不同的随机种子，从而保证每轮布局的唯一性。
         random.seed(os.urandom(16))
-        # ## **** FIX END **** ##
 
         if num_uavs is not None:
             self.last_uav_count = num_uavs
@@ -40,7 +38,6 @@ class SimulationManager:
         self.packets_in_network.clear()
         self.simulation_time = 0.0
         
-        # 重置MAC层状态，包括清空冲突队列
         self.mac_layer.reset_counters()
 
         for i in range(num_uavs):
@@ -114,23 +111,61 @@ class SimulationManager:
 
         return pairs_with_paths, f"成功生成 {len(pairs_with_paths)}/{pair_count} 个带初始路径的源-目标对。"
 
-
+    # ## **** MODIFICATION START: 使用Dijkstra算法并修复类型报错 **** ##
     def get_shortest_path(self, source_uav_id, target_uav_id):
+        """
+        使用Dijkstra算法计算两个无人机之间的最短地理距离路径。
+        """
         if not self.uavs: return None, "Simulation not active."
-        if source_uav_id not in self.uav_graph or target_uav_id not in self.uav_graph:
+        
+        uav_map = self.mac_layer.uav_map
+        if source_uav_id not in uav_map or target_uav_id not in uav_map:
             return None, "Source/Target not found."
+        
         if source_uav_id == target_uav_id: return [source_uav_id], "Source and target are the same."
 
-        queue = deque([(source_uav_id, [source_uav_id])])
-        visited = {source_uav_id}
-        while queue:
-            current_id, path = queue.popleft()
-            if current_id == target_uav_id: return path, "Path found."
+        # 记录到各节点的最短距离
+        distances = {uav_id: float('inf') for uav_id in uav_map}
+        distances[source_uav_id] = 0
+        
+        # 引入一个计数器来确保元组的唯一性，避免比较后续元素
+        entry_count = 0
+        # 优先队列，存储 (距离, 计数器, 当前节点ID, 路径列表)
+        # BUG FIX: 将初始距离从 0 改为 0.0 以确保类型一致性
+        pq = [(0.0, entry_count, source_uav_id, [source_uav_id])]
+
+        while pq:
+            dist, _, current_id, path = heapq.heappop(pq)
+
+            # 如果已经找到更短的路径，则跳过
+            if dist > distances[current_id]:
+                continue
+            
+            # 如果到达目标，则返回路径
+            if current_id == target_uav_id:
+                return path, f"Path found with total distance: {dist:.2f}m."
+
+            current_uav = uav_map[current_id]
             for neighbor_id in self.uav_graph.get(current_id, []):
-                if neighbor_id not in visited:
-                    visited.add(neighbor_id)
-                    queue.append((neighbor_id, path + [neighbor_id]))
+                neighbor_uav = uav_map[neighbor_id]
+                
+                # 计算边权重（两无人机间的距离）
+                weight = math.sqrt(
+                    (current_uav.x - neighbor_uav.x)**2 +
+                    (current_uav.y - neighbor_uav.y)**2 +
+                    (current_uav.z - neighbor_uav.z)**2
+                )
+                
+                new_dist = dist + weight
+                
+                # 如果找到了更短的路径
+                if new_dist < distances[neighbor_id]:
+                    distances[neighbor_id] = new_dist
+                    entry_count += 1
+                    heapq.heappush(pq, (new_dist, entry_count, neighbor_id, path + [neighbor_id]))
+                    
         return None, "No path found."
+    # ## **** MODIFICATION END **** ##
 
     def _build_uav_graph(self):
         self.uav_graph = {uav.id: [] for uav in self.uavs}
