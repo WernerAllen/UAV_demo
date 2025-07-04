@@ -37,71 +37,87 @@ class MACLayer:
         if not potential_senders:
             return
 
+        # --- 距离干扰检测 ---
+        # 统计本时间片所有接收节点及其对应的(发送者,包)
+        receiver_to_senders = {}
+        for sender in potential_senders:
+            packet = sender.tx_queue[0]
+            receiver_id = packet.get_next_hop_id()
+            if receiver_id:
+                if receiver_id not in receiver_to_senders:
+                    receiver_to_senders[receiver_id] = []
+                receiver_to_senders[receiver_id].append((sender, packet))
+        # 找出所有本轮有接收包的接收节点
+        receivers = list(receiver_to_senders.keys())
+        # 检查所有接收节点对，若距离<20，且都在接收包，则这些包都发生距离干扰
+        interfered_receivers = set()
+        for i in range(len(receivers)):
+            for j in range(i+1, len(receivers)):
+                r1 = self.uav_map[receivers[i]]
+                r2 = self.uav_map[receivers[j]]
+                dist = ((r1.x - r2.x)**2 + (r1.y - r2.y)**2 + (r1.z - r2.z)**2) ** 0.5
+                if dist < 20:
+                    interfered_receivers.add(receivers[i])
+                    interfered_receivers.add(receivers[j])
+        # 记录所有受距离干扰影响的(发送者,包)
+        interfered_senders = set()
+        for rid in interfered_receivers:
+            for sender, packet in receiver_to_senders[rid]:
+                interfered_senders.add((sender, packet))
+        # --- 多对一冲突检测 ---
         transmitters_this_step = set()
-        
-        # 2. 优先处理已在冲突队列中的发送者
-        # 对于每个冲突的接收者，只允许其队列头的发送者尝试发送
-        for receiver_id, sender_queue in self.collision_queues.items():
-            if sender_queue:
-                head_sender_id = sender_queue[0]
-                head_sender = self.uav_map.get(head_sender_id)
-                if head_sender and head_sender in potential_senders:
-                    transmitters_this_step.add(head_sender)
-        
-        # 3. 处理新的传输请求，并检测新的冲突
-        # 将尚未处理的发送者按接收者分组
-        unhandled_senders = potential_senders - transmitters_this_step
-        receivers_map = {}
-        for sender in unhandled_senders:
-            next_hop_id = sender.tx_queue[0].get_next_hop_id()
-            if next_hop_id:
-                if next_hop_id not in receivers_map:
-                    receivers_map[next_hop_id] = []
-                receivers_map[next_hop_id].append(sender)
-
-        for receiver_id, senders in receivers_map.items():
+        collision_groups = []
+        for receiver_id, senders in receiver_to_senders.items():
             if len(senders) > 1:
-                # 新的冲突发生！将这些发送者加入该接收者的冲突队列
-                self._handle_new_collision(senders, receiver_id)
-            elif len(senders) == 1:
-                # 没有新冲突，此发送者可以尝试发送
-                transmitters_this_step.add(senders[0])
-
-        # 4. 对本时间片最终确定的所有发送者进行传输处理
-        for sender in transmitters_this_step:
+                collision_groups.append((receiver_id, senders))
+            else:
+                transmitters_this_step.add(senders[0][0])
+        # --- 队列合并规则 ---
+        # 检查是否有节点同时在距离干扰和多对一冲突中
+        collision_senders = set()
+        for receiver_id, senders in collision_groups:
+            for sender, packet in senders:
+                collision_senders.add((sender, packet))
+        overlap = {s for s, p in interfered_senders} & {s for s, p in collision_senders}
+        if overlap:
+            # 合并所有相关节点进 collision_queues
+            all_conflict = interfered_senders | collision_senders
+            for receiver_id, senders in receiver_to_senders.items():
+                if any((s, p) in all_conflict for s, p in senders):
+                    self._handle_new_collision([s for s, p in senders], receiver_id)
+        else:
+            # 分别处理
+            for receiver_id, senders in collision_groups:
+                self._handle_new_collision([s for s, p in senders], receiver_id)
+            for sender, packet in interfered_senders:
+                # 距离干扰单独处理，直接重传
+                self._log(f"DISTANCE INTERFERENCE at receiver {packet.get_next_hop_id()}! Sender: {sender.id}")
+                self._handle_failure(sender, packet, "Distance_Interference")
+        # 重新识别本轮可正常发送的发送者
+        handled_senders = {s for s, p in interfered_senders} | {s for s, p in collision_senders}
+        unhandled_senders = potential_senders - handled_senders
+        # 其余发送者正常尝试发送
+        for sender in unhandled_senders:
             self.total_hop_attempts += 1
             packet = sender.tx_queue[0]
             receiver_id = packet.get_next_hop_id()
             receiver = self.uav_map.get(receiver_id)
-
-            # 检查传输是否成功
-            is_successful = self._attempt_transmission(sender, receiver, list(transmitters_this_step))
-            
-            # 根据结果更新状态
+            is_successful = self._attempt_transmission(sender, receiver, list(potential_senders))
             if is_successful:
                 self._handle_success(sender, receiver, packet)
             else:
-                self._handle_failure(sender, packet, "Transmission_Error") # 失败原因在内部日志记录
+                self._handle_failure(sender, packet, "Transmission_Error")
 
     def _attempt_transmission(self, sender, receiver, all_transmitters):
         """执行单次传输尝试的所有检查，返回True或False"""
         packet = sender.tx_queue[0]
-        if not receiver:
-            self._log_failure(packet, "Mobility(Receiver_Gone)")
+        # 只保留PRR失败重传，其它如Mobility、SINR等相关代码全部删除
+        if receiver is None:
+            self._log_failure(packet, "Receiver_None")
             return False
-        if self.comm_model.check_mobility_failure(sender, receiver):
-            self._log_failure(packet, "Mobility(Out_of_Range)")
-            return False
-        
-        interferers = [u for u in all_transmitters if u.id != sender.id]
-        if self.comm_model.check_interference_failure(sender, receiver, interferers):
-            self._log_failure(packet, "Interference(SINR)")
-            return False
-            
         if self.comm_model.check_prr_failure(receiver):
             self._log_failure(packet, "PRR(Packet_Loss)")
             return False
-        
         return True
 
     def _log(self, message):
@@ -131,9 +147,9 @@ class MACLayer:
 
     def _handle_failure(self, sender, packet, reason):
         """处理非冲突导致的失败"""
-        packet.retransmission_count += 1
-        if packet.retransmission_count >= MAX_RETRANSMISSIONS:
-            self._handle_terminal_failure(sender, packet, f"Max_Retries({reason})")
+        # 重传次数上限取消，不再丢弃包
+        self._log_failure(packet, reason)
+        # 保持包在队首等待下次重传
 
     def _handle_success(self, sender, receiver, packet):
         """处理成功的传输"""
