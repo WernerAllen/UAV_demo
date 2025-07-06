@@ -14,14 +14,16 @@ class MACLayer:
         self.total_hop_attempts = 0
         self.sim_time = 0
         
-        # ## **** NEW FEATURE: 冲突队列 **** ##
-        # 字典，键为接收者ID，值为一个发送者ID的队列(deque)
+        # 多对一冲突队列，键为接收者ID，值为发送者ID队列
         self.collision_queues = {}
+        # 距离干扰队列，键为受干扰接收者ID，值为发送者ID队列
+        self.distance_interference_queues = {}
 
     def reset_counters(self):
         self.total_hop_attempts = 0
         self.transmission_log.clear()
-        self.collision_queues.clear() # 重置时清空冲突队列
+        self.collision_queues.clear() # 重置多对一冲突队列
+        self.distance_interference_queues.clear() # 重置距离干扰队列
 
     def update_uav_list(self, all_uavs):
         self.all_uavs = all_uavs
@@ -47,7 +49,6 @@ class MACLayer:
                 if receiver_id not in receiver_to_senders:
                     receiver_to_senders[receiver_id] = []
                 receiver_to_senders[receiver_id].append((sender, packet))
-        # 找出所有本轮有接收包的接收节点
         receivers = list(receiver_to_senders.keys())
         # 检查所有接收节点对，若距离<20，且都在接收包，则这些包都发生距离干扰
         interfered_receivers = set()
@@ -80,20 +81,18 @@ class MACLayer:
                 collision_senders.add((sender, packet))
         overlap = {s for s, p in interfered_senders} & {s for s, p in collision_senders}
         if overlap:
-            # 合并所有相关节点进 collision_queues
+            # 合并所有相关节点进 collision_queues（已有逻辑，无需变动）
             all_conflict = interfered_senders | collision_senders
             for receiver_id, senders in receiver_to_senders.items():
                 if any((s, p) in all_conflict for s, p in senders):
                     self._handle_new_collision([s for s, p in senders], receiver_id)
         else:
-            # 分别处理
+            # 分别处理：多对一冲突和距离干扰分别入各自队列
             for receiver_id, senders in collision_groups:
                 self._handle_new_collision([s for s, p in senders], receiver_id)
-            for sender, packet in interfered_senders:
-                # 距离干扰单独处理，直接重传
-                self._log(f"DISTANCE INTERFERENCE at receiver {packet.get_next_hop_id()}! Sender: {sender.id}")
-                self._handle_failure(sender, packet, "Distance_Interference")
-        # 重新识别本轮可正常发送的发送者
+            for receiver_id in interfered_receivers:
+                self._handle_new_distance_interference([s for s, p in receiver_to_senders[receiver_id]], receiver_id)
+        # 重新识别本轮已被处理的发送者
         handled_senders = {s for s, p in interfered_senders} | {s for s, p in collision_senders}
         unhandled_senders = potential_senders - handled_senders
         # 其余发送者正常尝试发送
@@ -107,6 +106,10 @@ class MACLayer:
                 self._handle_success(sender, receiver, packet)
             else:
                 self._handle_failure(sender, packet, "Transmission_Error")
+
+        # 新增：分别处理距离干扰队列和多对一冲突队列的队首
+        self._process_distance_interference_queues()
+        self._process_collision_queues()
 
     def _attempt_transmission(self, sender, receiver, all_transmitters):
         """执行单次传输尝试的所有检查，返回True或False"""
@@ -132,6 +135,7 @@ class MACLayer:
             self.total_hop_attempts += 1
             packet = sender.tx_queue[0]
             packet.retransmission_count += 1
+            # 若重传次数超限则丢弃
             if packet.retransmission_count >= MAX_RETRANSMISSIONS:
                 self._handle_terminal_failure(sender, packet, "Max_Retries(Collision_Init)")
 
@@ -168,4 +172,68 @@ class MACLayer:
             receiver.add_packet_to_queue(packet)
         else:
             self._log(f"Pkt:{packet.id} DELIVERED to final destination {receiver.id}!")
+
+    def _handle_new_distance_interference(self, senders, receiver_id):
+        """
+        处理新发生的距离干扰，将所有受影响的发送者加入该接收者的距离干扰队列。
+        该队列与多对一冲突队列互不影响，独立顺序重传。
+        """
+        self._log(f"NEW DISTANCE INTERFERENCE at receiver {receiver_id}! Senders: {[s.id for s in senders]}")
+        # 用新的队列覆盖旧队列，保证本轮所有受干扰发送者都入队
+        self.distance_interference_queues[receiver_id] = deque(s.id for s in senders)
+        for sender in senders:
+            self.total_hop_attempts += 1
+            packet = sender.tx_queue[0]
+            packet.retransmission_count += 1
+            # 若重传次数超限则丢弃
+            if packet.retransmission_count >= MAX_RETRANSMISSIONS:
+                self._handle_terminal_failure(sender, packet, "Max_Retries(Distance_Interference_Init)")
+
+    def _process_distance_interference_queues(self):
+        """
+        每个距离干扰队列只允许队首发送者尝试重传。
+        若重传成功则移出队列，否则等待下次时间片继续尝试。
+        队列为空时自动删除。
+        """
+        for receiver_id, queue in list(self.distance_interference_queues.items()):
+            if not queue:
+                continue
+            sender_id = queue[0]
+            sender = self.uav_map.get(sender_id)
+            if sender and sender.tx_queue:
+                packet = sender.tx_queue[0]
+                receiver = self.uav_map.get(receiver_id)
+                is_successful = self._attempt_transmission(sender, receiver, list(self.uav_map.values()))
+                if is_successful:
+                    self._handle_success(sender, receiver, packet)
+                    queue.popleft()
+                else:
+                    self._handle_failure(sender, packet, "Distance_Interference_Queue")
+            # 队列空则删除
+            if not queue:
+                del self.distance_interference_queues[receiver_id]
+
+    def _process_collision_queues(self):
+        """
+        每个多对一冲突队列只允许队首发送者尝试重传。
+        若重传成功则移出队列，否则等待下次时间片继续尝试。
+        队列为空时自动删除。
+        """
+        for receiver_id, queue in list(self.collision_queues.items()):
+            if not queue:
+                continue
+            sender_id = queue[0]
+            sender = self.uav_map.get(sender_id)
+            if sender and sender.tx_queue:
+                packet = sender.tx_queue[0]
+                receiver = self.uav_map.get(receiver_id)
+                is_successful = self._attempt_transmission(sender, receiver, list(self.uav_map.values()))
+                if is_successful:
+                    self._handle_success(sender, receiver, packet)
+                    queue.popleft()
+                else:
+                    self._handle_failure(sender, packet, "Collision_Queue")
+            # 队列空则删除
+            if not queue:
+                del self.collision_queues[receiver_id]
 
