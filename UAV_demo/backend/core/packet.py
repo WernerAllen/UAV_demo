@@ -23,6 +23,9 @@ class Packet:
         self.current_holder_id = source_id
         self.status = "pending"  # pending, in_transit, delivered, failed_...
         self.retransmission_count = 0
+        self.actual_hops = [source_id]
+        self.per_hop_waits = [0]
+        self.event_history = []  # 新增：事件历史
 
     def get_next_hop_id(self):
         if self.path and 0 <= self.current_hop_index < len(self.path) - 1:
@@ -35,3 +38,12 @@ class Packet:
         self.retransmission_count = 0
         if self.current_holder_id == self.destination_id:
             self.status = "delivered"
+
+    def add_event(self, event_type, holder_id, hop_index, sim_time, extra_info=""):
+        self.event_history.append({
+            "event": event_type,
+            "holder": holder_id,
+            "hop": hop_index,
+            "sim_time": sim_time,
+            "info": extra_info
+        })

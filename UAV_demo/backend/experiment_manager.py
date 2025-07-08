@@ -20,6 +20,7 @@ class ExperimentManager:
         self.average_hops_per_round = 0.0
         self.current_status_message = "空闲"
         self.current_round_paths = [] # 存储当前轮次所有S-D对的路径
+        self.all_round_actual_paths = []  # 新增：所有轮的实际路径
 
     # ## **** MODIFICATION START: 改变接口以接收S-D对列表 **** ##
     def start_experiment(self, total_rounds, pairs_data, num_uavs):
@@ -51,6 +52,7 @@ class ExperimentManager:
 
     # ## **** MODIFICATION START: 重构实验核心逻辑 **** ##
     def _run_experiment_logic(self, total_rounds, sd_pairs, num_uavs):
+        self.all_round_actual_paths = []  # 每次实验重置
         for i in range(total_rounds):
             self.current_status_message = f"正在运行第 {i + 1}/{total_rounds} 轮..."
             packets_this_round = []
@@ -105,15 +107,32 @@ class ExperimentManager:
             
             # -- 在一个原子锁内完成统计更新 --
             with self.simulation_lock:
-                # total_hop_attempts 已经包含了所有成功和失败的尝试，符合需求
-                self.total_hop_count += self.sim_manager.mac_layer.total_hop_attempts
+                # 新统计逻辑：每个包的总跳数为sum(p.per_hop_waits)，每轮取最大值
+                max_hops_this_round = 0
+                for p in packets_this_round:
+                    hops = sum(getattr(p, 'per_hop_waits', []))
+                    if hops > max_hops_this_round:
+                        max_hops_this_round = hops
+                self.total_hop_count += max_hops_this_round
                 self.completed_rounds += 1
                 if self.completed_rounds > 0:
                     self.average_hops_per_round = self.total_hop_count / self.completed_rounds
+                # 新增：记录本轮所有包的实际路径
+                self.all_round_actual_paths.append([
+                    {
+                        "id": p.id,
+                        "source": p.source_id,
+                        "destination": p.destination_id,
+                        "actual_hops": list(p.actual_hops)
+                    }
+                    for p in packets_this_round
+                ])
         
         self.current_status_message = f"实验完成！共执行 {self.completed_rounds} 轮。"
         self.is_running = False
-    # ## **** MODIFICATION END **** ##
+        # 新增：实验结束后收集所有包的最终状态
+        with self.simulation_lock:
+            self.sim_manager.mac_layer.collect_final_packet_status(self.sim_manager.packets_in_network)
 
     def _is_round_complete(self, packets_to_check):
         """
@@ -133,7 +152,17 @@ class ExperimentManager:
                 "total_hop_count": self.total_hop_count,
                 "average_hops_per_round": self.average_hops_per_round,
                 "message": self.current_status_message,
-                "current_paths": self.current_round_paths # 新增字段
+                "current_paths": self.current_round_paths, # 新增字段
+                "final_paths": [
+                    {
+                        "id": pkt.id,
+                        "source": pkt.source_id,
+                        "destination": pkt.destination_id,
+                        "actual_hops": list(pkt.actual_hops)
+                    }
+                    for pkt in self.sim_manager.packets_in_network
+                ] if not self.is_running else None,
+                "all_actual_paths": self.all_round_actual_paths if not self.is_running else None  # 新增
             }
         return status
     # ## **** MODIFICATION END **** ##

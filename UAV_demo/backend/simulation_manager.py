@@ -189,7 +189,7 @@ class SimulationManager:
             "time": self.simulation_time,
             "uavs": [uav.get_data_for_api() for uav in self.uavs],
             "packets": [p.__dict__ for p in self.packets_in_network],
-            "mac_log": list(self.mac_layer.transmission_log),
+            "mac_packet_status": self.mac_layer.get_packet_status_snapshot(),
             'grid_config': {
                 'rows': GRID_ROWS, 'cols': GRID_COLS, 'prr_map': PRR_GRID_MAP,
                 'width': MAX_X, 'height': MAX_Y

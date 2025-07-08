@@ -73,7 +73,14 @@ document.addEventListener('DOMContentLoaded', () => {
             currentPackets = stateData.packets || [];
         }
         currentGridConfig = stateData.grid_config || null;
-        if (stateData.mac_log) renderMacLog(stateData.mac_log);
+        // 优先mac_packet_status，其次mac_log，展示格式不变
+        if (stateData.mac_packet_status) {
+            renderMacLog(stateData.mac_packet_status.map(pkt =>
+                `Pkt:${pkt.id} [${pkt.status}] holder:${pkt.current_holder_id} hop:${pkt.current_hop_index} retrans:${pkt.retransmission_count} path:${pkt.actual_hops.join('→')}`
+            ));
+        } else if (stateData.mac_log) {
+            renderMacLog(stateData.mac_log);
+        }
         currentTimeDisplay.textContent = (stateData.time !== undefined ? stateData.time : 0.0).toFixed(2);
         simulationStatusDisplay.textContent = stateData.status || "未知";
         const isRunning = stateData.status === "running";
@@ -377,7 +384,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ## **** NEW: 可视化逻辑与后端MAC层完全对齐 **** ##
-    // 该函数模拟了后端的冲突队列机制，以解决前端可视化中的死锁问题，并正确显示“等待中”状态。
+    // 该函数模拟了后端的冲突队列机制，以解决前端可视化中的死锁问题，并正确显示"等待中"状态。
     function getBackendAlignedVisualizationData() {
         if (!staticExperimentPaths || staticExperimentPaths.length === 0) return [];
         
@@ -516,7 +523,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const result = await apiCall('experiment/generate-pairs', 'POST', { pair_count: pairCount });
         
         if (result && result.ok && result.data.pairs.length > 0) {
-            staticExperimentPaths = result.data.pairs;
+            // 深拷贝，防止后续被修改
+            window.staticExperimentPaths = JSON.parse(JSON.stringify(result.data.pairs));
+            staticExperimentPaths = window.staticExperimentPaths;
             displayMessage(result.data.message, false);
             await refreshFullStateAndRedraw();
             renderExperimentPaths([{ round: "初始", paths: staticExperimentPaths }]);
@@ -596,19 +605,96 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    async function refreshMacLogOnly() {
+        const result = await apiCall('simulation/state');
+        if (result.ok && result.data) {
+            const stateData = result.data;
+            if (stateData.mac_packet_status) {
+                // 按时间片分组渲染事件历史
+                const eventsByTime = {};
+                stateData.mac_packet_status.forEach(pkt => {
+                    if (Array.isArray(pkt.event_history) && pkt.event_history.length > 0) {
+                        pkt.event_history.forEach(ev => {
+                            if (ev.event === 'waiting') return; // 跳过waiting事件
+                            const t = ev.sim_time !== undefined ? ev.sim_time : 0;
+                            if (!eventsByTime[t]) eventsByTime[t] = [];
+                            // 获取下一个hop（如果有）
+                            let nextHop = undefined;
+                            if (pkt.path && ev.hop !== undefined && ev.hop + 1 < pkt.path.length) {
+                                nextHop = pkt.path[ev.hop + 1];
+                            }
+                            let holderStr = nextHop ? `${ev.holder}->${nextHop}` : `${ev.holder}`;
+                            let desc = `Pkt:${pkt.id} [${ev.event}] ${holderStr} hop:${ev.hop + 1}`;
+                            if (ev.info) desc += ` info:${ev.info}`;
+                            eventsByTime[t].push(desc);
+                        });
+                    } else {
+                        // 没有事件历史时，归入时间片0
+                        if (!eventsByTime[0]) eventsByTime[0] = [];
+                        eventsByTime[0].push(`Pkt:${pkt.id} [${pkt.status}] holder:${pkt.current_holder_id} hop:${pkt.current_hop_index} retrans:${pkt.retransmission_count} path:${pkt.actual_hops.join('→')}`);
+                    }
+                });
+                // 按时间片升序渲染
+                const sortedTimes = Object.keys(eventsByTime).map(Number).sort((a,b)=>a-b);
+                const lines = [];
+                sortedTimes.forEach(t => {
+                    lines.push(`--- 时间片 ${t} ---`);
+                    lines.push(...eventsByTime[t]);
+                });
+                renderMacLog(lines);
+            } else if (stateData.mac_log) {
+                renderMacLog(stateData.mac_log);
+            } else {
+                renderMacLog([]);
+            }
+        }
+    }
+
     function stopExperimentPolling(finalMessage) {
         if (experimentPollingInterval) { clearInterval(experimentPollingInterval); experimentPollingInterval = null; }
-        
         visualizationContainer.style.display = 'block';
-        // 使用与后端逻辑完全对齐的新函数
         const alignedData = getBackendAlignedVisualizationData();
         renderProcessVisualization(alignedData);
-
         setManualControlsDisabled(false);
         startExperimentButton.disabled = true;
         previousExperimentStatus = null; 
         displayMessage(finalMessage || "实验已结束。", false);
         expStatusMessage.textContent = finalMessage;
+        // 只刷新MAC层传输日志
+        refreshMacLogOnly();
+        // 新增：实验结束后用实际路径刷新右侧路径
+        refreshFinalPathsDisplay();
+    }
+
+    async function refreshFinalPathsDisplay() {
+        const result = await apiCall('experiment/status');
+        if (result.ok && result.data && Array.isArray(result.data.final_paths)) {
+            // 只用staticExperimentPaths渲染初始轮
+            const initialPaths = (window.staticExperimentPaths && window.staticExperimentPaths.length > 0)
+                ? window.staticExperimentPaths
+                : [];
+            const initialRound = {
+                round: "初始",
+                paths: initialPaths.map(p => ({
+                    source: p.source,
+                    destination: p.destination,
+                    path: p.path
+                }))
+            };
+            // 多轮实际路径
+            let actualRounds = [];
+            if (Array.isArray(result.data.all_actual_paths)) {
+                actualRounds = result.data.all_actual_paths.map((roundPaths, idx) => ({
+                    round: `${idx + 1}`,
+                    paths: roundPaths.map(p => ({
+                        source: p.source,
+                        destination: p.destination,
+                        path: p.actual_hops
+                    }))
+                }));
+            }
+            renderExperimentPaths([initialRound, ...actualRounds]);
+        }
     }
 
     // --- 事件监听器绑定 ---
