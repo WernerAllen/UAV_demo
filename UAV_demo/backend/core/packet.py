@@ -26,18 +26,21 @@ class Packet:
         self.actual_hops = [source_id]
         self.per_hop_waits = [0]
         self.event_history = []  # 新增：事件历史
+        self.delivery_time = None  # 新增：送达耗时
 
     def get_next_hop_id(self):
         if self.path and 0 <= self.current_hop_index < len(self.path) - 1:
             return self.path[self.current_hop_index + 1]
         return None
 
-    def advance_hop(self):
+    def advance_hop(self, sim_time=None):
         self.current_hop_index += 1
         self.current_holder_id = self.path[self.current_hop_index]
         self.retransmission_count = 0
         if self.current_holder_id == self.destination_id:
             self.status = "delivered"
+            if sim_time is not None:
+                self.delivery_time = sim_time - self.creation_time
 
     def add_event(self, event_type, holder_id, hop_index, sim_time, extra_info=""):
         self.event_history.append({

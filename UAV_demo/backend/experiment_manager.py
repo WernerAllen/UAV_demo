@@ -16,8 +16,8 @@ class ExperimentManager:
         # --- 实验状态重置 ---
         self.total_rounds_to_run = 0
         self.completed_rounds = 0
-        self.total_hop_count = 0
-        self.average_hops_per_round = 0.0
+        self.total_time = 0
+        self.average_time_per_round = 0.0
         self.current_status_message = "空闲"
         self.current_round_paths = [] # 存储当前轮次所有S-D对的路径
         self.all_round_actual_paths = []  # 新增：所有轮的实际路径
@@ -32,8 +32,8 @@ class ExperimentManager:
         self.is_running = True
         self.total_rounds_to_run = total_rounds
         self.completed_rounds = 0
-        self.total_hop_count = 0
-        self.average_hops_per_round = 0.0
+        self.total_time = 0
+        self.average_time_per_round = 0.0
         self.current_status_message = "实验已开始..."
         self.current_round_paths = []
 
@@ -55,6 +55,7 @@ class ExperimentManager:
         self.all_round_actual_paths = []  # 每次实验重置
         for i in range(total_rounds):
             self.current_status_message = f"正在运行第 {i + 1}/{total_rounds} 轮..."
+            print(f"正在运行第 {i + 1}/{total_rounds} 轮...")
             packets_this_round = []
             
             # -- 在一个原子锁内完成一轮的准备工作 --
@@ -107,16 +108,15 @@ class ExperimentManager:
             
             # -- 在一个原子锁内完成统计更新 --
             with self.simulation_lock:
-                # 新统计逻辑：每个包的总跳数为sum(p.per_hop_waits)，每轮取最大值
-                max_hops_this_round = 0
+                # 新统计逻辑：每个包的总耗时，取最大值
+                max_time_this_round = 0
                 for p in packets_this_round:
-                    hops = sum(getattr(p, 'per_hop_waits', []))
-                    if hops > max_hops_this_round:
-                        max_hops_this_round = hops
-                self.total_hop_count += max_hops_this_round
+                    if getattr(p, 'delivery_time', None) is not None and p.delivery_time > max_time_this_round:
+                        max_time_this_round = p.delivery_time
+                self.total_time += max_time_this_round
                 self.completed_rounds += 1
                 if self.completed_rounds > 0:
-                    self.average_hops_per_round = self.total_hop_count / self.completed_rounds
+                    self.average_time_per_round = self.total_time / self.completed_rounds
                 # 新增：记录本轮所有包的实际路径
                 self.all_round_actual_paths.append([
                     {
@@ -149,8 +149,8 @@ class ExperimentManager:
                 "is_running": self.is_running,
                 "total_rounds_to_run": self.total_rounds_to_run,
                 "completed_rounds": self.completed_rounds,
-                "total_hop_count": self.total_hop_count,
-                "average_hops_per_round": self.average_hops_per_round,
+                "total_time": self.total_time,
+                "average_time_per_round": self.average_time_per_round,
                 "message": self.current_status_message,
                 "current_paths": self.current_round_paths, # 新增字段
                 "final_paths": [
@@ -158,7 +158,8 @@ class ExperimentManager:
                         "id": pkt.id,
                         "source": pkt.source_id,
                         "destination": pkt.destination_id,
-                        "actual_hops": list(pkt.actual_hops)
+                        "actual_hops": list(pkt.actual_hops),
+                        "delivery_time": getattr(pkt, 'delivery_time', None)
                     }
                     for pkt in self.sim_manager.packets_in_network
                 ] if not self.is_running else None,

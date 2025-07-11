@@ -10,7 +10,7 @@ from core.uav import UAV
 from core.packet import Packet
 from mac_layer.mac import MACLayer
 from simulation_config import *
-
+from models.communication_model import RoutingModel
 
 class SimulationManager:
     def __init__(self):
@@ -21,7 +21,11 @@ class SimulationManager:
         self.uav_graph = {}
         self.colors = ["blue", "green", "purple", "orange", "cyan", "magenta", "lime", "maroon", "navy", "olive",
                        "teal", "silver", "gold", "indigo", "violet", "pink", "khaki", "turquoise", "salmon", "tan"] * 5
-        self.mac_layer = MACLayer(self.uavs)
+        
+        # ## **** MODIFICATION START: 将sim_manager实例传给MAC层 **** ##
+        self.mac_layer = MACLayer(self.uavs, self)
+        # ## **** MODIFICATION END **** ##
+
         self.last_uav_count = DEFAULT_NUM_UAVS
 
     def start_simulation(self, num_uavs=None):
@@ -111,10 +115,11 @@ class SimulationManager:
 
         return pairs_with_paths, f"成功生成 {len(pairs_with_paths)}/{pair_count} 个带初始路径的源-目标对。"
 
-    # ## **** MODIFICATION START: 使用Dijkstra算法并修复类型报错 **** ##
+    # ## **** MODIFICATION START: 使用DHyTP模型重构寻路算法 **** ##
     def get_shortest_path(self, source_uav_id, target_uav_id):
         """
-        使用Dijkstra算法计算两个无人机之间的最短地理距离路径。
+        使用Dijkstra算法计算路径。
+        根据配置，权重可以是地理距离，也可以是DHyTP估算延迟。
         """
         if not self.uavs: return None, "Simulation not active."
         
@@ -124,41 +129,72 @@ class SimulationManager:
         
         if source_uav_id == target_uav_id: return [source_uav_id], "Source and target are the same."
 
-        # 记录到各节点的最短距离
+        # 初始化路由模型（如果需要）
+        routing_model = RoutingModel(uav_map) if USE_DHYTP_ROUTING_MODEL else None
+
+        # Dijkstra算法初始化
         distances = {uav_id: float('inf') for uav_id in uav_map}
         distances[source_uav_id] = 0
-        
-        # 引入一个计数器来确保元组的唯一性，避免比较后续元素
         entry_count = 0
-        # 优先队列，存储 (距离, 计数器, 当前节点ID, 路径列表)
-        # BUG FIX: 将初始距离从 0 改为 0.0 以确保类型一致性
         pq = [(0.0, entry_count, source_uav_id, [source_uav_id])]
 
         while pq:
             dist, _, current_id, path = heapq.heappop(pq)
 
-            # 如果已经找到更短的路径，则跳过
             if dist > distances[current_id]:
                 continue
             
-            # 如果到达目标，则返回路径
             if current_id == target_uav_id:
-                return path, f"Path found with total distance: {dist:.2f}m."
+                unit = "s" if USE_DHYTP_ROUTING_MODEL else "m"
+                return path, f"Path found with total weight: {dist:.2f}{unit}."
 
             current_uav = uav_map[current_id]
             for neighbor_id in self.uav_graph.get(current_id, []):
                 neighbor_uav = uav_map[neighbor_id]
                 
-                # 计算边权重（两无人机间的距离）
-                weight = math.sqrt(
-                    (current_uav.x - neighbor_uav.x)**2 +
-                    (current_uav.y - neighbor_uav.y)**2 +
-                    (current_uav.z - neighbor_uav.z)**2
-                )
+                # --- 核心修改：计算边的权重 ---
+                edge_weight = 0.0
+                if USE_DHYTP_ROUTING_MODEL and routing_model:
+                    # 使用DHyTP模型计算估算延迟作为权重
+                    
+                    # 1. 计算基础链路延迟 (EoD之和)
+                    edge_weight = routing_model.get_link_base_delay(current_uav, neighbor_uav)
+
+                    # 2. 计算并发区域带来的额外延迟
+                    # 检查此链路是否与网络中其他数据包的当前跳有并发
+                    concurrent_delay = 0.0
+                    link_p1 = (current_uav.x, current_uav.y)
+                    link_q1 = (neighbor_uav.x, neighbor_uav.y)
+
+                    for pkt in self.packets_in_network:
+                        # 排除发往此邻居的包或已送达的包
+                        if pkt.status == 'delivered' or pkt.get_next_hop_id() == neighbor_id:
+                            continue
+                        
+                        holder = self.mac_layer.uav_map.get(pkt.current_holder_id)
+                        next_hop = self.mac_layer.uav_map.get(pkt.get_next_hop_id())
+
+                        if holder and next_hop:
+                            pkt_p2 = (holder.x, holder.y)
+                            pkt_q2 = (next_hop.x, next_hop.y)
+                            if routing_model.are_vectors_concurrent(link_p1, link_q1, pkt_p2, pkt_q2):
+                                # 如果并发，累加惩罚性延迟
+                                concurrent_delay += routing_model.calculate_concurrent_region_delay(
+                                    link_p1, link_q1, pkt_p2, pkt_q2
+                                )
+                    edge_weight += concurrent_delay
+
+                else:
+                    # 使用旧的地理距离作为权重
+                    edge_weight = math.sqrt(
+                        (current_uav.x - neighbor_uav.x)**2 +
+                        (current_uav.y - neighbor_uav.y)**2 +
+                        (current_uav.z - neighbor_uav.z)**2
+                    )
+                # --- 权重计算结束 ---
+
+                new_dist = dist + edge_weight
                 
-                new_dist = dist + weight
-                
-                # 如果找到了更短的路径
                 if new_dist < distances[neighbor_id]:
                     distances[neighbor_id] = new_dist
                     entry_count += 1

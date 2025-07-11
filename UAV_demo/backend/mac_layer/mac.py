@@ -6,10 +6,15 @@ from models.communication_model import CommunicationModel
 from simulation_config import MAX_RETRANSMISSIONS
 
 class MACLayer:
-    def __init__(self, all_uavs):
+    def __init__(self, all_uavs, sim_manager):
         self.all_uavs = all_uavs
         self.uav_map = {uav.id: uav for uav in all_uavs}
         self.comm_model = CommunicationModel()
+
+        # ## **** MODIFICATION START: 保存对sim_manager的引用 **** ##
+        self.sim_manager = sim_manager 
+        # ## **** MODIFICATION END **** ##
+
         self.total_hop_attempts = 0
         self.sim_time = 0
         self.packet_status_snapshot = []
@@ -30,6 +35,8 @@ class MACLayer:
 
     # ## **** REFACTORED: 实现基于队列的冲突解决 **** ##
     def process_transmissions(self, sim_time):
+        print(f"--- 时间片 {float(sim_time)} ---")  # 控制台输出
+        # self._log(f"--- 时间片 {float(sim_time)} ---")  # 写入日志
         self.sim_time = sim_time
         self.packet_status_snapshot.clear()
 
@@ -68,6 +75,7 @@ class MACLayer:
                 if dist < 20:
                     interfered_receivers.add(receivers[i])
                     interfered_receivers.add(receivers[j])
+                    print(f"!!! 发生距离干扰: receiver {receivers[i]} 和 {receivers[j]} 距离: {dist}")
         # 记录所有受距离干扰影响的(发送者,包)
         interfered_senders = set()
         for rid in interfered_receivers:
@@ -78,6 +86,8 @@ class MACLayer:
         collision_groups = []
         for receiver_id, senders in receiver_to_senders.items():
             if len(senders) > 1:
+                print(f"!!! 发生多对一冲突: receiver {receiver_id}，senders: {[s[0].id for s in senders]}")
+                # print(f"!!! 发生多对一冲突: receiver {receiver_id}，senders: {[s.id for s in senders]}")
                 collision_groups.append((receiver_id, senders))
             else:
                 transmitters_this_step.add(senders[0][0])
@@ -128,18 +138,34 @@ class MACLayer:
         if receiver is None:
             self._log_failure(packet, "Receiver_None")
             return False, "Receiver_None"
+
+        # ## **** MODIFICATION START: 恢复移动失败检测 **** ##
+        if self.comm_model.check_mobility_failure(sender, receiver):
+            self._log_failure(packet, "Mobility_Failure")
+            return False, "Mobility_Failure"
+        # ## **** MODIFICATION END **** ##
+
         if self.comm_model.check_prr_failure(receiver):
             self._log_failure(packet, "PRR(Packet_Loss)")
             return False, "PRR"
+            
         return True, None
 
     def _log(self, message):
-        pass
+        # 追加日志到 transmission_log，带上当前时间片
+        if not hasattr(self, "transmission_log"):
+            self.transmission_log = []
+        self.transmission_log.append(f"[T={self.sim_time}] {message}")
 
     def _handle_new_collision(self, senders, receiver_id):
-        """处理新发生的冲突，将发送者加入队列"""
-        self._log(f"NEW COLLISION at receiver {receiver_id}! Senders: {[s.id for s in senders]}")
-        self.collision_queues[receiver_id] = deque(s.id for s in senders)
+        print(f"调用_handle_new_collision, receiver_id={receiver_id}, senders={[s.id for s in senders]}")
+        if receiver_id not in self.collision_queues or not self.collision_queues[receiver_id]:
+            self.collision_queues[receiver_id] = deque(s.id for s in senders)
+        else:
+            # 保持原有队列，补充新 sender
+            for s in senders:
+                if s.id not in self.collision_queues[receiver_id]:
+                    self.collision_queues[receiver_id].append(s.id)
         for sender in senders:
             self.total_hop_attempts += 1
             packet = sender.tx_queue[0]
@@ -171,12 +197,54 @@ class MACLayer:
 
     def _handle_failure(self, sender, packet, reason):
         """处理非冲突导致的失败"""
-        # 重传次数上限取消，不再丢弃包
+
+        # ## **** MODIFICATION START: 实现本地路径修复逻辑 **** ##
+        if reason == "Mobility_Failure":
+            self._log(f"Pkt:{packet.id} Mobility Failure from {sender.id} to {packet.get_next_hop_id()}. Attempting local reroute...")
+            
+            # 尝试寻找一条新的绕行路径
+            reroute_path_ids, msg = self.sim_manager.get_shortest_path(
+                sender.id, packet.get_next_hop_id()
+            )
+
+            if reroute_path_ids and len(reroute_path_ids) > 1:
+                # 成功找到绕行路径！
+                self._log(f"Pkt:{packet.id} Reroute SUCCESS. New local path: {reroute_path_ids}")
+                
+                # '焊接'新旧路径:
+                # 原路径: [..., A, B, C, ...] (当前在A，要去B)
+                # 绕行路径: [A, X, Y, B]
+                # 新路径: [..., A, X, Y, B, C, ...]
+                original_path = packet.path
+                current_hop_idx = packet.current_hop_index
+                
+                # 新路径 = 原路径在当前节点之前的部分 + 绕行路径 + 原路径在目标节点之后的部分
+                new_full_path = original_path[:current_hop_idx] + reroute_path_ids + original_path[current_hop_idx + 2:]
+                
+                packet.path = new_full_path
+                packet.add_event("reroute_success", sender.id, current_hop_idx, self.sim_time, f"New path via {reroute_path_ids[1]}")
+                
+                # 包留在队首，等待下一个时间片用新路径发送
+                return
+
+            else:
+                # 未能找到绕行路径，进入常规重传逻辑
+                self._log(f"Pkt:{packet.id} Reroute FAILED. No alternative path found. Will retry.")
+                # (接下来会执行下面的常规重传逻辑)
+        # ## **** MODIFICATION END **** ##
+
+        # 对于其他失败原因或绕行失败的情况，执行常规重传
+        packet.retransmission_count += 1
         self._log_failure(packet, reason)
         # 新增：记录重传事件
         if hasattr(packet, 'add_event'):
             packet.add_event("retransmit", packet.current_holder_id, packet.current_hop_index, self.sim_time, reason)
         # 保持包在队首等待下次重传
+
+        # 检查是否达到最大重传次数 (使用您提到的参数)
+        if packet.retransmission_count >= MAX_RETRANSMISSIONS:
+            self._handle_terminal_failure(sender, packet, f"Max_Retries({reason})")
+
 
     def _handle_success(self, sender, receiver, packet):
         """处理成功的传输"""
@@ -193,7 +261,7 @@ class MACLayer:
         # 新增：记录成功事件
         if hasattr(packet, 'add_event'):
             packet.add_event("success", packet.current_holder_id, packet.current_hop_index, self.sim_time)
-        packet.advance_hop()
+        packet.advance_hop(self.sim_time)
         packet.actual_hops.append(packet.current_holder_id)
         if hasattr(packet, 'per_hop_waits'):
             packet.per_hop_waits.append(0)
@@ -210,9 +278,13 @@ class MACLayer:
         处理新发生的距离干扰，将所有受影响的发送者加入该接收者的距离干扰队列。
         该队列与多对一冲突队列互不影响，独立顺序重传。
         """
-        self._log(f"NEW DISTANCE INTERFERENCE at receiver {receiver_id}! Senders: {[s.id for s in senders]}")
-        # 用新的队列覆盖旧队列，保证本轮所有受干扰发送者都入队
-        self.distance_interference_queues[receiver_id] = deque(s.id for s in senders)
+        print(f"调用_handle_new_distance_interference, receiver_id={receiver_id}, senders={[s.id for s in senders]}")
+        if receiver_id not in self.distance_interference_queues or not self.distance_interference_queues[receiver_id]:
+            self.distance_interference_queues[receiver_id] = deque(s.id for s in senders)
+        else:
+            for s in senders:
+                if s.id not in self.distance_interference_queues[receiver_id]:
+                    self.distance_interference_queues[receiver_id].append(s.id)
         for sender in senders:
             self.total_hop_attempts += 1
             packet = sender.tx_queue[0]
@@ -262,7 +334,7 @@ class MACLayer:
                 is_successful = self._attempt_transmission(sender, receiver, list(self.uav_map.values()))
                 if is_successful:
                     self._handle_success(sender, receiver, packet)
-                    queue.popleft()
+                    # queue.popleft()  # 已移除，避免重复 pop
                 else:
                     self._handle_failure(sender, packet, "Collision_Queue")
             # 队列空则删除

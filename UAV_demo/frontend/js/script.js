@@ -27,8 +27,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const expStatusMessage = document.getElementById('expStatusMessage');
     const expCompletedRounds = document.getElementById('expCompletedRounds');
     const expTotalRounds = document.getElementById('expTotalRounds');
-    const expTotalHops = document.getElementById('expTotalHops');
-    const expAvgHops = document.getElementById('expAvgHops');
+    const expTotalTime = document.getElementById('expTotalTime');
+    const expAvgTime = document.getElementById('expAvgTime');
     const experimentPathsDisplay = document.getElementById('experimentPathsDisplay');
 
     // 新的可视化面板元素
@@ -192,7 +192,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function updateUAVMap(uavs) { uavMap.clear(); if(uavs) uavs.forEach(uav => uavMap.set(uav.id, uav)); }
     function displayMessage(text, isError=false) { if(messagesDisplay) { messagesDisplay.textContent = text; messagesDisplay.style.color = isError ? 'red' : 'green'; } }
-    function renderMacLog(logEntries) { if (macLogContainer && Array.isArray(logEntries)) macLogContainer.textContent = logEntries.slice().reverse().join('\n'); macLogContainer.scrollTop = 0; }
+    function renderMacLog(logEntries) { 
+        if (macLogContainer && Array.isArray(logEntries)) 
+            macLogContainer.textContent = logEntries.slice().reverse().join('\n'); 
+        macLogContainer.scrollTop = 0; 
+    }
     
     async function initializeApp() {
         displayMessage("正在连接到后端...", false);
@@ -581,8 +585,11 @@ document.addEventListener('DOMContentLoaded', () => {
         
         expStatusMessage.textContent = statusData.message;
         expCompletedRounds.textContent = statusData.completed_rounds;
-        expTotalHops.textContent = statusData.total_hop_count;
-        expAvgHops.textContent = (statusData.average_hops_per_round || 0).toFixed(2);
+        // 替换跳数统计赋值为耗时统计
+        if (statusData) {
+            expTotalTime.textContent = (statusData.total_time || 0).toFixed(2);
+            expAvgTime.textContent = (statusData.average_time_per_round || 0).toFixed(2);
+        }
         
         if (statusData.completed_rounds > previousExperimentStatus.completed_rounds) {
             for (let i = previousExperimentStatus.completed_rounds + 1; i <= statusData.completed_rounds; i++) {
