@@ -133,6 +133,37 @@ class ExperimentManager:
         # 新增：实验结束后收集所有包的最终状态
         with self.simulation_lock:
             self.sim_manager.mac_layer.collect_final_packet_status(self.sim_manager.packets_in_network)
+            
+            # ## **** MODIFICATION START: 打印所有数据包的事件历史 **** ##
+            print("\n" + "="*80)
+            print("实验完成！所有数据包的事件历史：")
+            print("="*80)
+            
+            for pkt in self.sim_manager.packets_in_network:
+                print(f"\n数据包 {pkt.id} ({pkt.source_id} -> {pkt.destination_id}):")
+                print(f"  状态: {pkt.status}")
+                print(f"  实际路径: {pkt.actual_hops}")
+                if hasattr(pkt, 'delivery_time') and pkt.delivery_time is not None:
+                    print(f"  送达时间: {pkt.delivery_time:.2f}秒")
+                
+                if pkt.event_history:
+                    print(f"  事件历史 ({len(pkt.event_history)} 个事件):")
+                    for i, event in enumerate(pkt.event_history, 1):
+                        print(f"    {i}. [{event['sim_time']:.2f}s] {event['event']} - {event['info']}")
+                else:
+                    print("  事件历史: 无")
+            
+            # 统计位置变动事件
+            position_change_count = 0
+            for pkt in self.sim_manager.packets_in_network:
+                for event in pkt.event_history:
+                    if event['event'] == 'position_change':
+                        position_change_count += 1
+            
+            print(f"\n" + "="*80)
+            print(f"位置变动事件统计: 共 {position_change_count} 次")
+            print("="*80)
+            # ## **** MODIFICATION END **** ##
 
     def _is_round_complete(self, packets_to_check):
         """

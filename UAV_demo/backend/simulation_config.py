@@ -50,10 +50,12 @@ GRID_TRANSMISSION_ERROR = {   # (delta^t(z)) 每个网格的累积传输时间�
 
 # 重传与干扰模型配置
 MAX_RETRANSMISSIONS = 100
-TRANSMIT_POWER_WATTS = 0.1
-PATH_LOSS_EXPONENT = 2.7
-NOISE_POWER_WATTS = 1e-12
-SINR_THRESHOLD = 10
+
+# ## **** MODIFICATION START: 位置变动检测配置 **** ##
+# 位置变动检测阈值 (米)
+POSITION_CHANGE_THRESHOLD = 2.5  # 检测下一跳节点位置变动的阈值
+# ## **** MODIFICATION END **** ##
+
 
 
 DB_CONFIG = {

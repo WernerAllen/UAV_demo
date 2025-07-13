@@ -3,7 +3,8 @@
 
 from collections import deque
 from models.communication_model import CommunicationModel
-from simulation_config import MAX_RETRANSMISSIONS
+from simulation_config import MAX_RETRANSMISSIONS, POSITION_CHANGE_THRESHOLD
+import math
 
 class MACLayer:
     def __init__(self, all_uavs, sim_manager):
@@ -139,6 +140,23 @@ class MACLayer:
             self._log_failure(packet, "Receiver_None")
             return False, "Receiver_None"
 
+        # ## **** MODIFICATION START: 添加位置变动检查 **** ##
+        # 检查下一跳节点位置是否有变动
+        next_hop_id = packet.get_next_hop_id()
+        if next_hop_id and receiver:
+            # 检查位置是否有显著变动
+            position_changed, distance_change = packet.check_next_hop_position_change(
+                next_hop_id, receiver.x, receiver.y, receiver.z, threshold=POSITION_CHANGE_THRESHOLD
+            )
+            
+            if position_changed:
+                # 记录位置变动事件
+                if hasattr(packet, 'add_event'):
+                    packet.add_event("position_change", sender.id, packet.current_hop_index, self.sim_time, 
+                                   f"Next hop {next_hop_id} moved {distance_change:.2f}m")
+                self._log(f"Pkt:{packet.id} Next hop {next_hop_id} position changed by {distance_change:.2f}m")
+        # ## **** MODIFICATION END **** ##
+
         # ## **** MODIFICATION START: 恢复移动失败检测 **** ##
         if self.comm_model.check_mobility_failure(sender, receiver):
             self._log_failure(packet, "Mobility_Failure")
@@ -223,6 +241,15 @@ class MACLayer:
                 
                 packet.path = new_full_path
                 packet.add_event("reroute_success", sender.id, current_hop_idx, self.sim_time, f"New path via {reroute_path_ids[1]}")
+                
+                # ## **** MODIFICATION START: 记录新路径中下一跳节点的位置 **** ##
+                # 记录新路径中每个下一跳节点的位置
+                for i in range(current_hop_idx, len(new_full_path) - 1):
+                    next_hop_id = new_full_path[i + 1]
+                    next_hop_uav = self.uav_map.get(next_hop_id)
+                    if next_hop_uav:
+                        packet.record_next_hop_position(next_hop_id, next_hop_uav.x, next_hop_uav.y, next_hop_uav.z)
+                # ## **** MODIFICATION END **** ##
                 
                 # 包留在队首，等待下一个时间片用新路径发送
                 return

@@ -77,6 +77,16 @@ class SimulationManager:
             packet = Packet(source_id, destination_id, self.simulation_time)
             packet.path = path_ids
             packet.status = "in_transit"
+            
+            # ## **** MODIFICATION START: 记录下一跳节点位置 **** ##
+            # 记录路径中每个下一跳节点的初始位置
+            for i in range(len(path_ids) - 1):
+                next_hop_id = path_ids[i + 1]
+                next_hop_uav = self.mac_layer.uav_map.get(next_hop_id)
+                if next_hop_uav:
+                    packet.record_next_hop_position(next_hop_id, next_hop_uav.x, next_hop_uav.y, next_hop_uav.z)
+            # ## **** MODIFICATION END **** ##
+            
             self.packets_in_network.append(packet)
             source_uav.add_packet_to_queue(packet)
             created_packets.append(packet)
@@ -231,3 +241,36 @@ class SimulationManager:
                 'width': MAX_X, 'height': MAX_Y
             }
         }
+
+    # ## **** MODIFICATION START: 添加打印数据包事件历史的方法 **** ##
+    def print_packet_event_history(self):
+        """打印所有数据包的事件历史"""
+        print("\n" + "="*80)
+        print("仿真完成！所有数据包的事件历史：")
+        print("="*80)
+        
+        for pkt in self.packets_in_network:
+            print(f"\n数据包 {pkt.id} ({pkt.source_id} -> {pkt.destination_id}):")
+            print(f"  状态: {pkt.status}")
+            print(f"  实际路径: {pkt.actual_hops}")
+            if hasattr(pkt, 'delivery_time') and pkt.delivery_time is not None:
+                print(f"  送达时间: {pkt.delivery_time:.2f}秒")
+            
+            if pkt.event_history:
+                print(f"  事件历史 ({len(pkt.event_history)} 个事件):")
+                for i, event in enumerate(pkt.event_history, 1):
+                    print(f"    {i}. [{event['sim_time']:.2f}s] {event['event']} - {event['info']}")
+            else:
+                print("  事件历史: 无")
+        
+        # 统计位置变动事件
+        position_change_count = 0
+        for pkt in self.packets_in_network:
+            for event in pkt.event_history:
+                if event['event'] == 'position_change':
+                    position_change_count += 1
+        
+        print(f"\n" + "="*80)
+        print(f"位置变动事件统计: 共 {position_change_count} 次")
+        print("="*80)
+    # ## **** MODIFICATION END **** ##

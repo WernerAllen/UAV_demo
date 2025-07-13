@@ -139,6 +139,48 @@ def get_experiment_status_endpoint():
     return jsonify(status)
 
 
+# ## **** NEW ENDPOINT: 获取数据包事件历史 **** ##
+@app.route('/api/simulation/packet-events', methods=['GET'])
+def get_packet_events_endpoint():
+    """获取所有数据包的事件历史"""
+    with exp_manager.simulation_lock:
+        if not sim_manager.packets_in_network:
+            return jsonify({"message": "当前没有数据包", "packets": []})
+        
+        packets_data = []
+        position_change_count = 0
+        
+        for pkt in sim_manager.packets_in_network:
+            packet_info = {
+                "id": pkt.id,
+                "source_id": pkt.source_id,
+                "destination_id": pkt.destination_id,
+                "status": pkt.status,
+                "actual_hops": list(pkt.actual_hops),
+                "delivery_time": getattr(pkt, 'delivery_time', None),
+                "event_history": []
+            }
+            
+            # 统计位置变动事件
+            for event in pkt.event_history:
+                if event['event'] == 'position_change':
+                    position_change_count += 1
+                packet_info["event_history"].append({
+                    "sim_time": event['sim_time'],
+                    "event": event['event'],
+                    "info": event['info']
+                })
+            
+            packets_data.append(packet_info)
+        
+        return jsonify({
+            "message": f"共 {len(packets_data)} 个数据包，{position_change_count} 次位置变动事件",
+            "packets": packets_data,
+            "position_change_count": position_change_count
+        })
+# ## **** MODIFICATION END **** ##
+
+
 if __name__ == '__main__':
     print("Starting Flask server for UAV Simulation...")
     app.run(host='0.0.0.0', port=API_DEFAULT_PORT, debug=True)
