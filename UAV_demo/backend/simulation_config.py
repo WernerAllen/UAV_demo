@@ -18,7 +18,7 @@ MAX_DIRECTION_TIME = 10.0  # 最多沿一个方向飞10秒
 # ## **** MODIFICATION END **** ##
 
 # 仿真默认参数
-DEFAULT_NUM_UAVS = 150
+DEFAULT_NUM_UAVS = 200
 DEFAULT_TIME_INCREMENT = 0.1  # 每个仿真步长代表的秒数
 
 # 无人机通信
@@ -37,7 +37,7 @@ PRR_GRID_MAP = [
 USE_DHYTP_ROUTING_MODEL = True
 
 # 并发区域检测阈值 
-CONCURRENCY_DISTANCE_THRESHOLD = 30.0  # (d_max) 判断并发的最大距离 (米)
+CONCURRENCY_DISTANCE_THRESHOLD = 20.0  # (d_max) 判断并发的最大距离 (米)
 CONCURRENCY_ANGLE_THRESHOLD = 25.0   # (theta_max) 判断并发的最大夹角 (度)
 
 # EoD模型所需参数
@@ -48,13 +48,12 @@ GRID_TRANSMISSION_ERROR = {   # (delta^t(z)) 每个网格的累积传输时间�
     (2, 0): 0.01, (2, 1): 0.02, (2, 2): 0.01,
 }
 
-# 重传与干扰模型配置
-MAX_RETRANSMISSIONS = 100
+# 重传次数上限
+MAX_RETRANSMISSIONS = 10
 
-# ## **** MODIFICATION START: 位置变动检测配置 **** ##
 # 位置变动检测阈值 (米)
-POSITION_CHANGE_THRESHOLD = 2.5  # 检测下一跳节点位置变动的阈值
-# ## **** MODIFICATION END **** ##
+POSITION_CHANGE_THRESHOLD = 1.5  # 检测下一跳节点位置变动的阈值
+
 
 
 

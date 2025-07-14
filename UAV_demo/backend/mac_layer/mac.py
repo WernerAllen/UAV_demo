@@ -2,7 +2,7 @@
 # 描述: 重构MAC层以实现基于队列的冲突解决机制
 
 from collections import deque
-from models.communication_model import CommunicationModel
+from models.communication_model import CommunicationModel, RoutingModel
 from simulation_config import MAX_RETRANSMISSIONS, POSITION_CHANGE_THRESHOLD
 import math
 
@@ -11,6 +11,7 @@ class MACLayer:
         self.all_uavs = all_uavs
         self.uav_map = {uav.id: uav for uav in all_uavs}
         self.comm_model = CommunicationModel()
+        self.routing_model = RoutingModel(self.uav_map)  # 新增：初始化DHyTP模型
 
         # ## **** MODIFICATION START: 保存对sim_manager的引用 **** ##
         self.sim_manager = sim_manager 
@@ -33,6 +34,8 @@ class MACLayer:
     def update_uav_list(self, all_uavs):
         self.all_uavs = all_uavs
         self.uav_map = {uav.id: uav for uav in all_uavs}
+        if hasattr(self, 'routing_model'):
+            self.routing_model.uav_map = self.uav_map  # 保持同步
 
     # ## **** REFACTORED: 实现基于队列的冲突解决 **** ##
     def process_transmissions(self, sim_time):
@@ -40,6 +43,8 @@ class MACLayer:
         # self._log(f"--- 时间片 {float(sim_time)} ---")  # 写入日志
         self.sim_time = sim_time
         self.packet_status_snapshot.clear()
+        import simulation_config
+        self.use_dhytp = getattr(simulation_config, 'USE_DHYTP_ROUTING_MODEL', False)
 
         # 1. 识别所有有数据要发的无人机
         potential_senders = {uav for uav in self.all_uavs if uav.tx_queue}
@@ -49,6 +54,8 @@ class MACLayer:
         # 新增：所有队首包的当前跳等待+1
         for uav in potential_senders:
             packet = uav.tx_queue[0]
+            if not hasattr(packet, 'concurrent_delay'):
+                packet.concurrent_delay = 0  # 初始化并发延时
             if hasattr(packet, 'per_hop_waits') and packet.per_hop_waits:
                 packet.per_hop_waits[-1] += 1
                 # 新增：记录等待事件
@@ -82,6 +89,9 @@ class MACLayer:
         for rid in interfered_receivers:
             for sender, packet in receiver_to_senders[rid]:
                 interfered_senders.add((sender, packet))
+                # 新增：记录并发事件
+                if hasattr(packet, 'add_event'):
+                    packet.add_event("concurrency_detected", packet.current_holder_id, packet.current_hop_index, self.sim_time, "distance_interference")
         # --- 多对一冲突检测 ---
         transmitters_this_step = set()
         collision_groups = []
@@ -90,6 +100,10 @@ class MACLayer:
                 print(f"!!! 发生多对一冲突: receiver {receiver_id}，senders: {[s[0].id for s in senders]}")
                 # print(f"!!! 发生多对一冲突: receiver {receiver_id}，senders: {[s.id for s in senders]}")
                 collision_groups.append((receiver_id, senders))
+                # 新增：为所有冲突包添加并发事件
+                for sender, packet in senders:
+                    if hasattr(packet, 'add_event'):
+                        packet.add_event("concurrency_detected", packet.current_holder_id, packet.current_hop_index, self.sim_time, "collision")
             else:
                 transmitters_this_step.add(senders[0][0])
         # --- 队列合并规则 ---
@@ -133,6 +147,93 @@ class MACLayer:
         # 记录所有包的实时状态
         self._collect_packet_status()
 
+    def _reroute_and_select_best_path(self, sender, packet, next_hop_id):
+        """
+        路径修复：
+        - USE_DHYTP_ROUTING_MODEL=False时，只用原有模型修复路径。
+        - USE_DHYTP_ROUTING_MODEL=True时，DHyTP与原有模型二选一。
+        """
+        import simulation_config
+        if not getattr(simulation_config, 'USE_DHYTP_ROUTING_MODEL', False):
+            # 只用原有模型
+            orig_path_ids, _ = self.sim_manager.get_shortest_path(
+                sender.id, next_hop_id
+            )
+            if orig_path_ids and len(orig_path_ids) > 1:
+                new_path = orig_path_ids
+                self._log(f"Pkt:{packet.id} Use original path: {new_path} [PositionChange, OnlyOrigModel]")
+                # 焊接新路径
+                original_path = packet.path
+                current_hop_idx = packet.current_hop_index
+                new_full_path = original_path[:current_hop_idx] + new_path + original_path[current_hop_idx + 2:]
+                packet.path = new_full_path
+                packet.add_event("reroute_success", sender.id, current_hop_idx, self.sim_time, f"New path via {new_path[1]}")
+                for i in range(current_hop_idx, len(new_full_path) - 1):
+                    next_hop_id2 = new_full_path[i + 1]
+                    next_hop_uav = self.uav_map.get(next_hop_id2)
+                    if next_hop_uav:
+                        packet.record_next_hop_position(next_hop_id2, next_hop_uav.x, next_hop_uav.y, next_hop_uav.z)
+            else:
+                self._log(f"Pkt:{packet.id} Reroute FAILED. No alternative path found. [PositionChange, OnlyOrigModel]")
+            return
+        # 否则，二选一优选
+        # 1. 传统模型
+        orig_path_ids, _ = self.sim_manager.get_shortest_path(
+            sender.id, next_hop_id
+        )
+        orig_delay = None
+        if orig_path_ids and len(orig_path_ids) > 1:
+            orig_delay = 0.0
+            for i in range(len(orig_path_ids) - 1):
+                uav1 = self.uav_map.get(orig_path_ids[i])
+                uav2 = self.uav_map.get(orig_path_ids[i+1])
+                if uav1 and uav2:
+                    orig_delay += math.sqrt((uav1.x - uav2.x)**2 + (uav1.y - uav2.y)**2 + (uav1.z - uav2.z)**2)
+                else:
+                    orig_delay = float('inf')
+                    break
+        # 2. DHyTP模型
+        old_flag = getattr(simulation_config, 'USE_DHYTP_ROUTING_MODEL', False)
+        simulation_config.USE_DHYTP_ROUTING_MODEL = True
+        dhytp_path_ids, _ = self.sim_manager.get_shortest_path(
+            sender.id, next_hop_id
+        )
+        simulation_config.USE_DHYTP_ROUTING_MODEL = old_flag
+        dhytp_delay = None
+        if dhytp_path_ids and len(dhytp_path_ids) > 1:
+            dhytp_delay = 0.0
+            for i in range(len(dhytp_path_ids) - 1):
+                uav1 = self.uav_map.get(dhytp_path_ids[i])
+                uav2 = self.uav_map.get(dhytp_path_ids[i+1])
+                if uav1 and uav2:
+                    dhytp_delay += self.routing_model.get_link_base_delay(uav1, uav2)
+                else:
+                    dhytp_delay = float('inf')
+                    break
+        # 3. 选择更优路径
+        orig_delay_str = f"{orig_delay:.2f}" if orig_delay is not None else "N/A"
+        dhytp_delay_str = f"{dhytp_delay:.2f}" if dhytp_delay is not None else "N/A"
+        if dhytp_delay is not None and orig_delay is not None and dhytp_delay < orig_delay:
+            new_path = dhytp_path_ids
+            self._log(f"Pkt:{packet.id} Use DHyTP path: {new_path} (delay={dhytp_delay_str}) [PositionChange, 2Choose]")
+        else:
+            new_path = orig_path_ids
+            self._log(f"Pkt:{packet.id} Use original path: {new_path} (delay={orig_delay_str}) [PositionChange, 2Choose]")
+        # 4. 焊接新路径
+        if new_path and len(new_path) > 1:
+            original_path = packet.path
+            current_hop_idx = packet.current_hop_index
+            new_full_path = original_path[:current_hop_idx] + new_path + original_path[current_hop_idx + 2:]
+            packet.path = new_full_path
+            packet.add_event("reroute_success", sender.id, current_hop_idx, self.sim_time, f"New path via {new_path[1]}")
+            for i in range(current_hop_idx, len(new_full_path) - 1):
+                next_hop_id2 = new_full_path[i + 1]
+                next_hop_uav = self.uav_map.get(next_hop_id2)
+                if next_hop_uav:
+                    packet.record_next_hop_position(next_hop_id2, next_hop_uav.x, next_hop_uav.y, next_hop_uav.z)
+        else:
+            self._log(f"Pkt:{packet.id} Reroute FAILED. No alternative path found. [PositionChange, 2Choose]")
+
     def _attempt_transmission(self, sender, receiver, all_transmitters):
         """执行单次传输尝试的所有检查，返回(is_successful, reason)"""
         packet = sender.tx_queue[0]
@@ -140,22 +241,36 @@ class MACLayer:
             self._log_failure(packet, "Receiver_None")
             return False, "Receiver_None"
 
+        # === DHyTP链路估算（用当前sender/receiver位置） ===
+        if hasattr(self, "routing_model") and self.routing_model is not None:
+            link_delay = self.routing_model.get_link_base_delay(sender, receiver)
+            self._log(f"Pkt:{packet.id} DHyTP link delay: {link_delay:.2f}")
+        # === END DHyTP链路估算 ===
+
         # ## **** MODIFICATION START: 添加位置变动检查 **** ##
         # 检查下一跳节点位置是否有变动
         next_hop_id = packet.get_next_hop_id()
         if next_hop_id and receiver:
-            # 检查位置是否有显著变动
             position_changed, distance_change = packet.check_next_hop_position_change(
                 next_hop_id, receiver.x, receiver.y, receiver.z, threshold=POSITION_CHANGE_THRESHOLD
             )
-            
             if position_changed:
                 # 记录位置变动事件
                 if hasattr(packet, 'add_event'):
                     packet.add_event("position_change", sender.id, packet.current_hop_index, self.sim_time, 
                                    f"Next hop {next_hop_id} moved {distance_change:.2f}m")
                 self._log(f"Pkt:{packet.id} Next hop {next_hop_id} position changed by {distance_change:.2f}m")
+                # 立即修复路径
+                self._reroute_and_select_best_path(sender, packet, next_hop_id)
+                # 修复后，重新获取新路径的下一跳和receiver
+                next_hop_id = packet.get_next_hop_id()
+                receiver = self.uav_map.get(next_hop_id)
+                # 注意：如果修复失败，receiver可能为None，需处理
+                if receiver is None:
+                    self._log_failure(packet, "Receiver_None_AfterReroute")
+                    return False, "Receiver_None_AfterReroute"
         # ## **** MODIFICATION END **** ##
+        # 后续发送流程继续
 
         # ## **** MODIFICATION START: 恢复移动失败检测 **** ##
         if self.comm_model.check_mobility_failure(sender, receiver):
@@ -177,6 +292,8 @@ class MACLayer:
 
     def _handle_new_collision(self, senders, receiver_id):
         print(f"调用_handle_new_collision, receiver_id={receiver_id}, senders={[s.id for s in senders]}")
+        import simulation_config
+        use_dhytp = getattr(simulation_config, 'USE_DHYTP_ROUTING_MODEL', False)
         if receiver_id not in self.collision_queues or not self.collision_queues[receiver_id]:
             self.collision_queues[receiver_id] = deque(s.id for s in senders)
         else:
@@ -187,6 +304,11 @@ class MACLayer:
         for sender in senders:
             self.total_hop_attempts += 1
             packet = sender.tx_queue[0]
+            # 统计并发延时（仅在未用DHyTP模型时）
+            if not use_dhytp:
+                if not hasattr(packet, 'concurrent_delay'):
+                    packet.concurrent_delay = 0
+                packet.concurrent_delay += 1
             packet.retransmission_count += 1
             # 新增：记录重传事件
             if hasattr(packet, 'add_event'):
@@ -219,43 +341,70 @@ class MACLayer:
         # ## **** MODIFICATION START: 实现本地路径修复逻辑 **** ##
         if reason == "Mobility_Failure":
             self._log(f"Pkt:{packet.id} Mobility Failure from {sender.id} to {packet.get_next_hop_id()}. Attempting local reroute...")
-            
-            # 尝试寻找一条新的绕行路径
-            reroute_path_ids, msg = self.sim_manager.get_shortest_path(
+
+            # 尝试分别用传统模型和DHyTP模型计算新路径
+            # 1. 传统模型
+            orig_path_ids, _ = self.sim_manager.get_shortest_path(
                 sender.id, packet.get_next_hop_id()
             )
-
-            if reroute_path_ids and len(reroute_path_ids) > 1:
-                # 成功找到绕行路径！
-                self._log(f"Pkt:{packet.id} Reroute SUCCESS. New local path: {reroute_path_ids}")
-                
-                # '焊接'新旧路径:
-                # 原路径: [..., A, B, C, ...] (当前在A，要去B)
-                # 绕行路径: [A, X, Y, B]
-                # 新路径: [..., A, X, Y, B, C, ...]
+            orig_delay = None
+            if orig_path_ids and len(orig_path_ids) > 1:
+                orig_delay = 0.0
+                for i in range(len(orig_path_ids) - 1):
+                    uav1 = self.uav_map.get(orig_path_ids[i])
+                    uav2 = self.uav_map.get(orig_path_ids[i+1])
+                    if uav1 and uav2:
+                        # 传统模型用欧氏距离
+                        orig_delay += math.sqrt((uav1.x - uav2.x)**2 + (uav1.y - uav2.y)**2 + (uav1.z - uav2.z)**2)
+                    else:
+                        orig_delay = float('inf')
+                        break
+            # 2. DHyTP模型
+            # 临时切换全局变量
+            import simulation_config
+            old_flag = getattr(simulation_config, 'USE_DHYTP_ROUTING_MODEL', False)
+            simulation_config.USE_DHYTP_ROUTING_MODEL = True
+            dhytp_path_ids, _ = self.sim_manager.get_shortest_path(
+                sender.id, packet.get_next_hop_id()
+            )
+            simulation_config.USE_DHYTP_ROUTING_MODEL = old_flag
+            dhytp_delay = None
+            if dhytp_path_ids and len(dhytp_path_ids) > 1:
+                dhytp_delay = 0.0
+                for i in range(len(dhytp_path_ids) - 1):
+                    uav1 = self.uav_map.get(dhytp_path_ids[i])
+                    uav2 = self.uav_map.get(dhytp_path_ids[i+1])
+                    if uav1 and uav2:
+                        # DHyTP模型用routing_model
+                        dhytp_delay += self.routing_model.get_link_base_delay(uav1, uav2)
+                    else:
+                        dhytp_delay = float('inf')
+                        break
+            # 3. 选择更优路径
+            orig_delay_str = f"{orig_delay:.2f}" if orig_delay is not None else "N/A"
+            dhytp_delay_str = f"{dhytp_delay:.2f}" if dhytp_delay is not None else "N/A"
+            if dhytp_delay is not None and orig_delay is not None and dhytp_delay < orig_delay:
+                new_path = dhytp_path_ids
+                self._log(f"Pkt:{packet.id} Use DHyTP path: {new_path} (delay={dhytp_delay_str})")
+            else:
+                new_path = orig_path_ids
+                self._log(f"Pkt:{packet.id} Use original path: {new_path} (delay={orig_delay_str})")
+            # 4. 焊接新路径
+            if new_path and len(new_path) > 1:
                 original_path = packet.path
                 current_hop_idx = packet.current_hop_index
-                
-                # 新路径 = 原路径在当前节点之前的部分 + 绕行路径 + 原路径在目标节点之后的部分
-                new_full_path = original_path[:current_hop_idx] + reroute_path_ids + original_path[current_hop_idx + 2:]
-                
+                # 新路径 = 原路径在当前节点之前的部分 + 新路径 + 原路径在目标节点之后的部分
+                new_full_path = original_path[:current_hop_idx] + new_path + original_path[current_hop_idx + 2:]
                 packet.path = new_full_path
-                packet.add_event("reroute_success", sender.id, current_hop_idx, self.sim_time, f"New path via {reroute_path_ids[1]}")
-                
-                # ## **** MODIFICATION START: 记录新路径中下一跳节点的位置 **** ##
+                packet.add_event("reroute_success", sender.id, current_hop_idx, self.sim_time, f"New path via {new_path[1]}")
                 # 记录新路径中每个下一跳节点的位置
                 for i in range(current_hop_idx, len(new_full_path) - 1):
                     next_hop_id = new_full_path[i + 1]
                     next_hop_uav = self.uav_map.get(next_hop_id)
                     if next_hop_uav:
                         packet.record_next_hop_position(next_hop_id, next_hop_uav.x, next_hop_uav.y, next_hop_uav.z)
-                # ## **** MODIFICATION END **** ##
-                
-                # 包留在队首，等待下一个时间片用新路径发送
                 return
-
             else:
-                # 未能找到绕行路径，进入常规重传逻辑
                 self._log(f"Pkt:{packet.id} Reroute FAILED. No alternative path found. Will retry.")
                 # (接下来会执行下面的常规重传逻辑)
         # ## **** MODIFICATION END **** ##
@@ -306,6 +455,8 @@ class MACLayer:
         该队列与多对一冲突队列互不影响，独立顺序重传。
         """
         print(f"调用_handle_new_distance_interference, receiver_id={receiver_id}, senders={[s.id for s in senders]}")
+        import simulation_config
+        use_dhytp = getattr(simulation_config, 'USE_DHYTP_ROUTING_MODEL', False)
         if receiver_id not in self.distance_interference_queues or not self.distance_interference_queues[receiver_id]:
             self.distance_interference_queues[receiver_id] = deque(s.id for s in senders)
         else:
@@ -315,7 +466,15 @@ class MACLayer:
         for sender in senders:
             self.total_hop_attempts += 1
             packet = sender.tx_queue[0]
+            # 统计并发延时（仅在未用DHyTP模型时）
+            if not use_dhytp:
+                if not hasattr(packet, 'concurrent_delay'):
+                    packet.concurrent_delay = 0
+                packet.concurrent_delay += 1
             packet.retransmission_count += 1
+            # 新增：记录距离干扰重传事件
+            if hasattr(packet, 'add_event'):
+                packet.add_event("retransmit", packet.current_holder_id, packet.current_hop_index, self.sim_time, "distance_interference")
             # 若重传次数超限则丢弃
             if packet.retransmission_count >= MAX_RETRANSMISSIONS:
                 self._handle_terminal_failure(sender, packet, "Max_Retries(Distance_Interference_Init)")
@@ -392,7 +551,8 @@ class MACLayer:
                     'actual_hops': list(packet.actual_hops),
                     'per_hop_waits': list(packet.per_hop_waits),
                     'event_history': list(packet.event_history),  # 新增：事件历史
-                    'path': list(packet.path) if hasattr(packet, 'path') else []  # 新增：完整路径
+                    'path': list(packet.path) if hasattr(packet, 'path') else [],  # 新增：完整路径
+                    'concurrent_delay': getattr(packet, 'concurrent_delay', 0)  # 新增：并发延时
                 })
 
     def collect_final_packet_status(self, all_packets):
@@ -412,6 +572,7 @@ class MACLayer:
                 'actual_hops': list(packet.actual_hops),
                 'per_hop_waits': list(packet.per_hop_waits),
                 'event_history': list(packet.event_history),  # 新增：事件历史
-                'path': list(packet.path) if hasattr(packet, 'path') else []  # 新增：完整路径
+                'path': list(packet.path) if hasattr(packet, 'path') else [],  # 新增：完整路径
+                'concurrent_delay': getattr(packet, 'concurrent_delay', 0)  # 新增：并发延时
             })
 

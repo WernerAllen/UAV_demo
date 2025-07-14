@@ -145,6 +145,7 @@ class ExperimentManager:
                 print(f"  实际路径: {pkt.actual_hops}")
                 if hasattr(pkt, 'delivery_time') and pkt.delivery_time is not None:
                     print(f"  送达时间: {pkt.delivery_time:.2f}秒")
+                print(f"  并发时延: {getattr(pkt, 'concurrent_delay', 0)} 时间片")
                 
                 if pkt.event_history:
                     print(f"  事件历史 ({len(pkt.event_history)} 个事件):")
