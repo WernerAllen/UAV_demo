@@ -3,7 +3,21 @@
 
 import threading
 import time
+import math
 from simulation_manager import SimulationManager
+
+
+def safe_float(val):
+    try:
+        if val is None:
+            return 0.0
+        if isinstance(val, str):
+            return float(val) if val not in ("inf", "-inf", "nan", "Infinity", "-Infinity") else 0.0
+        if math.isinf(val) or math.isnan(val):
+            return 0.0
+        return float(val)
+    except Exception:
+        return 0.0
 
 
 class ExperimentManager:
@@ -53,9 +67,21 @@ class ExperimentManager:
     # ## **** MODIFICATION START: 重构实验核心逻辑 **** ##
     def _run_experiment_logic(self, total_rounds, sd_pairs, num_uavs):
         self.all_round_actual_paths = []  # 每次实验重置
-        for i in range(total_rounds):
-            self.current_status_message = f"正在运行第 {i + 1}/{total_rounds} 轮..."
-            print(f"正在运行第 {i + 1}/{total_rounds} 轮...")
+        MAX_STEPS_PER_ROUND = 20  # 最大步数保护，每步即为一个时间片
+        valid_rounds = 0
+        round_index = 0
+        while valid_rounds < total_rounds:
+            round_aborted = False  # 标记本轮是否异常终止
+            round_index += 1
+            self.current_status_message = f"正在运行第 {valid_rounds + 1}/{total_rounds} 轮..."
+            print(f"[实验进度] 状态: {self.current_status_message}")
+            print(f"[实验进度] 进度: {valid_rounds} / {total_rounds}")
+            print(f"[实验进度] 总耗时: {self.total_time:.2f} 秒")
+            if valid_rounds > 0:
+                print(f"[实验进度] 平均耗时/轮: {self.average_time_per_round:.2f} 秒")
+            else:
+                print(f"[实验进度] 平均耗时/轮: 0.00 秒")
+            print(f"正在运行第 {valid_rounds + 1}/{total_rounds} 轮... (实际第{round_index}次尝试)")
             packets_this_round = []
             
             # -- 在一个原子锁内完成一轮的准备工作 --
@@ -88,47 +114,51 @@ class ExperimentManager:
                 self.current_round_paths = current_paths_this_round
 
                 if not packets_this_round:
-                    self.current_status_message = f"第 {i + 1} 轮跳过: 未能为任何源-目标对找到有效路径。"
-                    self.completed_rounds += 1
+                    self.current_status_message = f"第 {valid_rounds + 1} 轮跳过: 未能为任何源-目标对找到有效路径。"
                     time.sleep(0.5)
                     continue
 
             # -- 运行仿真直到本轮结束 --
             round_start_time = time.time()
+            step_count = 0
             while True:
                 with self.simulation_lock:
                     if self._is_round_complete(packets_this_round):
                         break
                     self.sim_manager.step_simulation()
-
-                time.sleep(0.001) 
-                if time.time() - round_start_time > 60: # 超时保护
-                    self.current_status_message = f"第 {i + 1} 轮超时。"
+                step_count += 1
+                if step_count > MAX_STEPS_PER_ROUND:
+                    self.current_status_message += f"（本轮超出最大步数{MAX_STEPS_PER_ROUND}，强制终止，未计入统计）"
+                    # 标记未送达包为失败
+                    for pkt in packets_this_round:
+                        if pkt.status != 'delivered':
+                            pkt.status = 'failed_timeout'
+                    round_aborted = True
                     break
+                time.sleep(0.001)
             
             # -- 在一个原子锁内完成统计更新 --
             with self.simulation_lock:
-                # 新统计逻辑：每个包的总耗时，取最大值
-                max_time_this_round = 0
-                for p in packets_this_round:
-                    if getattr(p, 'delivery_time', None) is not None and p.delivery_time > max_time_this_round:
-                        max_time_this_round = p.delivery_time
-                self.total_time += max_time_this_round
-                self.completed_rounds += 1
-                if self.completed_rounds > 0:
-                    self.average_time_per_round = self.total_time / self.completed_rounds
-                # 新增：记录本轮所有包的实际路径
-                self.all_round_actual_paths.append([
-                    {
-                        "id": p.id,
-                        "source": p.source_id,
-                        "destination": p.destination_id,
-                        "actual_hops": list(p.actual_hops)
-                    }
-                    for p in packets_this_round
-                ])
-        
-        self.current_status_message = f"实验完成！共执行 {self.completed_rounds} 轮。"
+                if not round_aborted:
+                    # 只有正常轮次才统计
+                    self.sim_manager.mac_layer.collect_final_packet_status(packets_this_round)
+                    import math
+                    delays = [pkt.get('total_delay', 0) for pkt in self.sim_manager.mac_layer.packet_status_snapshot]
+                    # 过滤掉inf、nan和None
+                    delays = [d for d in delays if d is not None and isinstance(d, (int, float)) and not (math.isinf(d) or math.isnan(d))]
+                    if delays:
+                        max_time_this_round = max(delays)
+                        self.total_time += max_time_this_round
+                        valid_rounds += 1
+                        if valid_rounds > 0:
+                            self.average_time_per_round = self.total_time / valid_rounds
+                    else:
+                        # 本轮无有效包，不计入统计
+                        self.current_status_message += "（本轮无有效包，未计入统计）"
+                else:
+                    # 异常轮次不计入统计
+                    pass
+        self.current_status_message = f"实验完成！共执行 {valid_rounds} 轮。"
         self.is_running = False
         # 新增：实验结束后收集所有包的最终状态
         with self.simulation_lock:
@@ -181,8 +211,8 @@ class ExperimentManager:
                 "is_running": self.is_running,
                 "total_rounds_to_run": self.total_rounds_to_run,
                 "completed_rounds": self.completed_rounds,
-                "total_time": self.total_time,
-                "average_time_per_round": self.average_time_per_round,
+                "total_time": safe_float(self.total_time),
+                "average_time_per_round": safe_float(self.average_time_per_round),
                 "message": self.current_status_message,
                 "current_paths": self.current_round_paths, # 新增字段
                 "final_paths": [
@@ -191,7 +221,7 @@ class ExperimentManager:
                         "source": pkt.source_id,
                         "destination": pkt.destination_id,
                         "actual_hops": list(pkt.actual_hops),
-                        "delivery_time": getattr(pkt, 'delivery_time', None)
+                        "delivery_time": safe_float(getattr(pkt, 'delivery_time', None))
                     }
                     for pkt in self.sim_manager.packets_in_network
                 ] if not self.is_running else None,

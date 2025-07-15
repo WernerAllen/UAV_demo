@@ -9,6 +9,9 @@ import numpy as np
 
 class CommunicationModel:
     def check_prr_failure(self, receiver_uav):
+        import simulation_config
+        if not getattr(simulation_config, 'USE_PRR_FAILURE_MODEL', True):
+            return False
         if not (0 <= receiver_uav.x < MAX_X and 0 <= receiver_uav.y < MAX_Y):
             return True
         cell_width = MAX_X / GRID_COLS
@@ -29,7 +32,7 @@ class CommunicationModel:
 # ## **** MODIFICATION START: 新增路由模型估算类 **** ##
 class RoutingModel:
     """
-    实现论文中提出的DHyTP相关估算模型
+    实现论文中提出的PTP相关估算模型
     """
     def __init__(self, uav_map):
         self.uav_map = uav_map

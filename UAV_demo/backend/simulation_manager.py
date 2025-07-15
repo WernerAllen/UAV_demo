@@ -125,7 +125,7 @@ class SimulationManager:
 
         return pairs_with_paths, f"成功生成 {len(pairs_with_paths)}/{pair_count} 个带初始路径的源-目标对。"
 
-    # ## **** MODIFICATION START: 使用DHyTP模型重构寻路算法 **** ##
+    # ## **** MODIFICATION START: 使用PTP模型重构寻路算法 **** ##
     def get_shortest_path(self, source_uav_id, target_uav_id):
         """
         使用Dijkstra算法计算路径。
@@ -140,7 +140,7 @@ class SimulationManager:
         if source_uav_id == target_uav_id: return [source_uav_id], "Source and target are the same."
 
         # 初始化路由模型（如果需要）
-        routing_model = RoutingModel(uav_map) if USE_DHYTP_ROUTING_MODEL else None
+        routing_model = RoutingModel(uav_map) if USE_PTP_ROUTING_MODEL else None
 
         # Dijkstra算法初始化
         distances = {uav_id: float('inf') for uav_id in uav_map}
@@ -155,7 +155,7 @@ class SimulationManager:
                 continue
             
             if current_id == target_uav_id:
-                unit = "s" if USE_DHYTP_ROUTING_MODEL else "m"
+                unit = "s" if USE_PTP_ROUTING_MODEL else "m"
                 return path, f"Path found with total weight: {dist:.2f}{unit}."
 
             current_uav = uav_map[current_id]
@@ -164,8 +164,8 @@ class SimulationManager:
                 
                 # --- 核心修改：计算边的权重 ---
                 edge_weight = 0.0
-                if USE_DHYTP_ROUTING_MODEL and routing_model:
-                    # 使用DHyTP模型计算估算延迟作为权重
+                if USE_PTP_ROUTING_MODEL and routing_model:
+                    # 使用PTP模型计算估算延迟作为权重
                     
                     # 1. 计算基础链路延迟 (EoD之和)
                     edge_weight = routing_model.get_link_base_delay(current_uav, neighbor_uav)

@@ -11,7 +11,7 @@ class MACLayer:
         self.all_uavs = all_uavs
         self.uav_map = {uav.id: uav for uav in all_uavs}
         self.comm_model = CommunicationModel()
-        self.routing_model = RoutingModel(self.uav_map)  # 新增：初始化DHyTP模型
+        self.routing_model = RoutingModel(self.uav_map)  # 新增：初始化PTP模型
 
         # ## **** MODIFICATION START: 保存对sim_manager的引用 **** ##
         self.sim_manager = sim_manager 
@@ -44,7 +44,7 @@ class MACLayer:
         self.sim_time = sim_time
         self.packet_status_snapshot.clear()
         import simulation_config
-        self.use_dhytp = getattr(simulation_config, 'USE_DHYTP_ROUTING_MODEL', False)
+        self.use_ptp = getattr(simulation_config, 'USE_PTP_ROUTING_MODEL', False)
 
         # 1. 识别所有有数据要发的无人机
         potential_senders = {uav for uav in self.all_uavs if uav.tx_queue}
@@ -150,31 +150,13 @@ class MACLayer:
     def _reroute_and_select_best_path(self, sender, packet, next_hop_id):
         """
         路径修复：
-        - USE_DHYTP_ROUTING_MODEL=False时，只用原有模型修复路径。
-        - USE_DHYTP_ROUTING_MODEL=True时，DHyTP与原有模型二选一。
+        - USE_PTP_ROUTING_MODEL=False时，只用初始化路径传输，不做任何修复。
+        - USE_PTP_ROUTING_MODEL=True时，PTP与原有模型二选一。
         """
         import simulation_config
-        if not getattr(simulation_config, 'USE_DHYTP_ROUTING_MODEL', False):
-            # 只用原有模型
-            orig_path_ids, _ = self.sim_manager.get_shortest_path(
-                sender.id, next_hop_id
-            )
-            if orig_path_ids and len(orig_path_ids) > 1:
-                new_path = orig_path_ids
-                self._log(f"Pkt:{packet.id} Use original path: {new_path} [PositionChange, OnlyOrigModel]")
-                # 焊接新路径
-                original_path = packet.path
-                current_hop_idx = packet.current_hop_index
-                new_full_path = original_path[:current_hop_idx] + new_path + original_path[current_hop_idx + 2:]
-                packet.path = new_full_path
-                packet.add_event("reroute_success", sender.id, current_hop_idx, self.sim_time, f"New path via {new_path[1]}")
-                for i in range(current_hop_idx, len(new_full_path) - 1):
-                    next_hop_id2 = new_full_path[i + 1]
-                    next_hop_uav = self.uav_map.get(next_hop_id2)
-                    if next_hop_uav:
-                        packet.record_next_hop_position(next_hop_id2, next_hop_uav.x, next_hop_uav.y, next_hop_uav.z)
-            else:
-                self._log(f"Pkt:{packet.id} Reroute FAILED. No alternative path found. [PositionChange, OnlyOrigModel]")
+        if not getattr(simulation_config, 'USE_PTP_ROUTING_MODEL', False):
+            # 只用初始化路径，不做任何修复
+            self._log(f"Pkt:{packet.id} USE_PTP_ROUTING_MODEL=False, do NOT reroute, stick to initial path.")
             return
         # 否则，二选一优选
         # 1. 传统模型
@@ -192,33 +174,32 @@ class MACLayer:
                 else:
                     orig_delay = float('inf')
                     break
-        # 2. DHyTP模型
-        old_flag = getattr(simulation_config, 'USE_DHYTP_ROUTING_MODEL', False)
-        simulation_config.USE_DHYTP_ROUTING_MODEL = True
-        dhytp_path_ids, _ = self.sim_manager.get_shortest_path(
+        # 2. PTP模型
+        old_flag = getattr(simulation_config, 'USE_PTP_ROUTING_MODEL', False)
+        simulation_config.USE_PTP_ROUTING_MODEL = True
+        ptp_path_ids, _ = self.sim_manager.get_shortest_path(
             sender.id, next_hop_id
         )
-        simulation_config.USE_DHYTP_ROUTING_MODEL = old_flag
-        dhytp_delay = None
-        if dhytp_path_ids and len(dhytp_path_ids) > 1:
-            dhytp_delay = 0.0
-            for i in range(len(dhytp_path_ids) - 1):
-                uav1 = self.uav_map.get(dhytp_path_ids[i])
-                uav2 = self.uav_map.get(dhytp_path_ids[i+1])
+        simulation_config.USE_PTP_ROUTING_MODEL = old_flag
+        ptp_delay = None
+        if ptp_path_ids and len(ptp_path_ids) > 1:
+            ptp_delay = 0.0
+            for i in range(len(ptp_path_ids) - 1):
+                uav1 = self.uav_map.get(ptp_path_ids[i])
+                uav2 = self.uav_map.get(ptp_path_ids[i+1])
                 if uav1 and uav2:
-                    dhytp_delay += self.routing_model.get_link_base_delay(uav1, uav2)
+                    ptp_delay += self.routing_model.get_link_base_delay(uav1, uav2)
                 else:
-                    dhytp_delay = float('inf')
+                    ptp_delay = float('inf')
                     break
         # 3. 选择更优路径
-        orig_delay_str = f"{orig_delay:.2f}" if orig_delay is not None else "N/A"
-        dhytp_delay_str = f"{dhytp_delay:.2f}" if dhytp_delay is not None else "N/A"
-        if dhytp_delay is not None and orig_delay is not None and dhytp_delay < orig_delay:
-            new_path = dhytp_path_ids
-            self._log(f"Pkt:{packet.id} Use DHyTP path: {new_path} (delay={dhytp_delay_str}) [PositionChange, 2Choose]")
+        if ptp_delay is not None and orig_delay is not None and ptp_delay < orig_delay:
+            new_path = ptp_path_ids
+            self._log(f"Pkt:{packet.id} Use PTP path: {new_path} (delay={ptp_delay:.2f}) [PositionChange, 2Choose]")
         else:
             new_path = orig_path_ids
-            self._log(f"Pkt:{packet.id} Use original path: {new_path} (delay={orig_delay_str}) [PositionChange, 2Choose]")
+            delay_str = f"{orig_delay:.2f}" if orig_delay is not None else "N/A"
+            self._log(f"Pkt:{packet.id} Use original path: {new_path} (delay={delay_str}) [PositionChange, 2Choose]")
         # 4. 焊接新路径
         if new_path and len(new_path) > 1:
             original_path = packet.path
@@ -241,11 +222,11 @@ class MACLayer:
             self._log_failure(packet, "Receiver_None")
             return False, "Receiver_None"
 
-        # === DHyTP链路估算（用当前sender/receiver位置） ===
+        # === PTP链路估算（用当前sender/receiver位置） ===
         if hasattr(self, "routing_model") and self.routing_model is not None:
             link_delay = self.routing_model.get_link_base_delay(sender, receiver)
-            self._log(f"Pkt:{packet.id} DHyTP link delay: {link_delay:.2f}")
-        # === END DHyTP链路估算 ===
+            self._log(f"Pkt:{packet.id} PTP link delay: {link_delay:.2f}")
+        # === END PTP链路估算 ===
 
         # ## **** MODIFICATION START: 添加位置变动检查 **** ##
         # 检查下一跳节点位置是否有变动
@@ -278,9 +259,13 @@ class MACLayer:
             return False, "Mobility_Failure"
         # ## **** MODIFICATION END **** ##
 
-        if self.comm_model.check_prr_failure(receiver):
-            self._log_failure(packet, "PRR(Packet_Loss)")
-            return False, "PRR"
+        # ## **** MODIFICATION START: PRR丢包判定开关 **** ##
+        import simulation_config
+        if getattr(simulation_config, 'USE_PRR_FAILURE_MODEL', True):
+            if self.comm_model.check_prr_failure(receiver):
+                self._log_failure(packet, "PRR(Packet_Loss)")
+                return False, "PRR"
+        # ## **** MODIFICATION END **** ##
             
         return True, None
 
@@ -293,7 +278,7 @@ class MACLayer:
     def _handle_new_collision(self, senders, receiver_id):
         print(f"调用_handle_new_collision, receiver_id={receiver_id}, senders={[s.id for s in senders]}")
         import simulation_config
-        use_dhytp = getattr(simulation_config, 'USE_DHYTP_ROUTING_MODEL', False)
+        use_ptp = getattr(simulation_config, 'USE_PTP_ROUTING_MODEL', False)
         if receiver_id not in self.collision_queues or not self.collision_queues[receiver_id]:
             self.collision_queues[receiver_id] = deque(s.id for s in senders)
         else:
@@ -304,8 +289,8 @@ class MACLayer:
         for sender in senders:
             self.total_hop_attempts += 1
             packet = sender.tx_queue[0]
-            # 统计并发延时（仅在未用DHyTP模型时）
-            if not use_dhytp:
+            # 统计并发延时（仅在未用PTP模型时）
+            if not use_ptp:
                 if not hasattr(packet, 'concurrent_delay'):
                     packet.concurrent_delay = 0
                 packet.concurrent_delay += 1
@@ -337,76 +322,76 @@ class MACLayer:
 
     def _handle_failure(self, sender, packet, reason):
         """处理非冲突导致的失败"""
-
+        import simulation_config
         # ## **** MODIFICATION START: 实现本地路径修复逻辑 **** ##
         if reason == "Mobility_Failure":
-            self._log(f"Pkt:{packet.id} Mobility Failure from {sender.id} to {packet.get_next_hop_id()}. Attempting local reroute...")
-
-            # 尝试分别用传统模型和DHyTP模型计算新路径
-            # 1. 传统模型
-            orig_path_ids, _ = self.sim_manager.get_shortest_path(
-                sender.id, packet.get_next_hop_id()
-            )
-            orig_delay = None
-            if orig_path_ids and len(orig_path_ids) > 1:
-                orig_delay = 0.0
-                for i in range(len(orig_path_ids) - 1):
-                    uav1 = self.uav_map.get(orig_path_ids[i])
-                    uav2 = self.uav_map.get(orig_path_ids[i+1])
-                    if uav1 and uav2:
-                        # 传统模型用欧氏距离
-                        orig_delay += math.sqrt((uav1.x - uav2.x)**2 + (uav1.y - uav2.y)**2 + (uav1.z - uav2.z)**2)
-                    else:
-                        orig_delay = float('inf')
-                        break
-            # 2. DHyTP模型
-            # 临时切换全局变量
-            import simulation_config
-            old_flag = getattr(simulation_config, 'USE_DHYTP_ROUTING_MODEL', False)
-            simulation_config.USE_DHYTP_ROUTING_MODEL = True
-            dhytp_path_ids, _ = self.sim_manager.get_shortest_path(
-                sender.id, packet.get_next_hop_id()
-            )
-            simulation_config.USE_DHYTP_ROUTING_MODEL = old_flag
-            dhytp_delay = None
-            if dhytp_path_ids and len(dhytp_path_ids) > 1:
-                dhytp_delay = 0.0
-                for i in range(len(dhytp_path_ids) - 1):
-                    uav1 = self.uav_map.get(dhytp_path_ids[i])
-                    uav2 = self.uav_map.get(dhytp_path_ids[i+1])
-                    if uav1 and uav2:
-                        # DHyTP模型用routing_model
-                        dhytp_delay += self.routing_model.get_link_base_delay(uav1, uav2)
-                    else:
-                        dhytp_delay = float('inf')
-                        break
-            # 3. 选择更优路径
-            orig_delay_str = f"{orig_delay:.2f}" if orig_delay is not None else "N/A"
-            dhytp_delay_str = f"{dhytp_delay:.2f}" if dhytp_delay is not None else "N/A"
-            if dhytp_delay is not None and orig_delay is not None and dhytp_delay < orig_delay:
-                new_path = dhytp_path_ids
-                self._log(f"Pkt:{packet.id} Use DHyTP path: {new_path} (delay={dhytp_delay_str})")
+            if not getattr(simulation_config, 'USE_PTP_ROUTING_MODEL', False):
+                self._log(f"Pkt:{packet.id} Mobility Failure, but reroute disabled. Will retry or drop.")
+                # 不做路径修复，直接进入重传/丢包逻辑
             else:
-                new_path = orig_path_ids
-                self._log(f"Pkt:{packet.id} Use original path: {new_path} (delay={orig_delay_str})")
-            # 4. 焊接新路径
-            if new_path and len(new_path) > 1:
-                original_path = packet.path
-                current_hop_idx = packet.current_hop_index
-                # 新路径 = 原路径在当前节点之前的部分 + 新路径 + 原路径在目标节点之后的部分
-                new_full_path = original_path[:current_hop_idx] + new_path + original_path[current_hop_idx + 2:]
-                packet.path = new_full_path
-                packet.add_event("reroute_success", sender.id, current_hop_idx, self.sim_time, f"New path via {new_path[1]}")
-                # 记录新路径中每个下一跳节点的位置
-                for i in range(current_hop_idx, len(new_full_path) - 1):
-                    next_hop_id = new_full_path[i + 1]
-                    next_hop_uav = self.uav_map.get(next_hop_id)
-                    if next_hop_uav:
-                        packet.record_next_hop_position(next_hop_id, next_hop_uav.x, next_hop_uav.y, next_hop_uav.z)
-                return
-            else:
-                self._log(f"Pkt:{packet.id} Reroute FAILED. No alternative path found. Will retry.")
-                # (接下来会执行下面的常规重传逻辑)
+                self._log(f"Pkt:{packet.id} Mobility Failure from {sender.id} to {packet.get_next_hop_id()}. Attempting local reroute...")
+                # 尝试分别用传统模型和PTP模型计算新路径
+                # 1. 传统模型
+                orig_path_ids, _ = self.sim_manager.get_shortest_path(
+                    sender.id, packet.get_next_hop_id()
+                )
+                orig_delay = None
+                if orig_path_ids and len(orig_path_ids) > 1:
+                    orig_delay = 0.0
+                    for i in range(len(orig_path_ids) - 1):
+                        uav1 = self.uav_map.get(orig_path_ids[i])
+                        uav2 = self.uav_map.get(orig_path_ids[i+1])
+                        if uav1 and uav2:
+                            # 传统模型用欧氏距离
+                            orig_delay += math.sqrt((uav1.x - uav2.x)**2 + (uav1.y - uav2.y)**2 + (uav1.z - uav2.z)**2)
+                        else:
+                            orig_delay = float('inf')
+                            break
+                # 2. PTP模型
+                # 临时切换全局变量
+                old_flag = getattr(simulation_config, 'USE_PTP_ROUTING_MODEL', False)
+                simulation_config.USE_PTP_ROUTING_MODEL = True
+                ptp_path_ids, _ = self.sim_manager.get_shortest_path(
+                    sender.id, packet.get_next_hop_id()
+                )
+                simulation_config.USE_PTP_ROUTING_MODEL = old_flag
+                ptp_delay = None
+                if ptp_path_ids and len(ptp_path_ids) > 1:
+                    ptp_delay = 0.0
+                    for i in range(len(ptp_path_ids) - 1):
+                        uav1 = self.uav_map.get(ptp_path_ids[i])
+                        uav2 = self.uav_map.get(ptp_path_ids[i+1])
+                        if uav1 and uav2:
+                            # PTP模型用routing_model
+                            ptp_delay += self.routing_model.get_link_base_delay(uav1, uav2)
+                        else:
+                            ptp_delay = float('inf')
+                            break
+                # 3. 选择更优路径
+                if ptp_delay is not None and orig_delay is not None and ptp_delay < orig_delay:
+                    new_path = ptp_path_ids
+                    self._log(f"Pkt:{packet.id} Use PTP path: {new_path} (delay={ptp_delay:.2f})")
+                else:
+                    new_path = orig_path_ids
+                    self._log(f"Pkt:{packet.id} Use original path: {new_path} (delay={orig_delay:.2f})")
+                # 4. 焊接新路径
+                if new_path and len(new_path) > 1:
+                    original_path = packet.path
+                    current_hop_idx = packet.current_hop_index
+                    # 新路径 = 原路径在当前节点之前的部分 + 新路径 + 原路径在目标节点之后的部分
+                    new_full_path = original_path[:current_hop_idx] + new_path + original_path[current_hop_idx + 2:]
+                    packet.path = new_full_path
+                    packet.add_event("reroute_success", sender.id, current_hop_idx, self.sim_time, f"New path via {new_path[1]}")
+                    # 记录新路径中每个下一跳节点的位置
+                    for i in range(current_hop_idx, len(new_full_path) - 1):
+                        next_hop_id = new_full_path[i + 1]
+                        next_hop_uav = self.uav_map.get(next_hop_id)
+                        if next_hop_uav:
+                            packet.record_next_hop_position(next_hop_id, next_hop_uav.x, next_hop_uav.y, next_hop_uav.z)
+                    return
+                else:
+                    self._log(f"Pkt:{packet.id} Reroute FAILED. No alternative path found. Will retry.")
+                    # (接下来会执行下面的常规重传逻辑)
         # ## **** MODIFICATION END **** ##
 
         # 对于其他失败原因或绕行失败的情况，执行常规重传
@@ -441,11 +426,44 @@ class MACLayer:
         packet.actual_hops.append(packet.current_holder_id)
         if hasattr(packet, 'per_hop_waits'):
             packet.per_hop_waits.append(0)
+        
+        import simulation_config
+        # 统一统计true_total_delay，静态路径累加EoD+并发惩罚，动态路径只累加EoD
+        if not hasattr(packet, 'true_total_delay'):
+            packet.true_total_delay = 0.0
+        if len(packet.actual_hops) >= 2:
+            uav1 = self.uav_map.get(packet.actual_hops[-2])
+            uav2 = self.uav_map.get(packet.actual_hops[-1])
+            base_delay = 0.0
+            concurrent_penalty = 0.0
+            if uav1 and uav2 and hasattr(self, 'routing_model'):
+                base_delay = self.routing_model.get_link_base_delay(uav1, uav2)
+                if not getattr(simulation_config, 'USE_PTP_ROUTING_MODEL', False):
+                    # 静态路径才加并发惩罚
+                    for pkt in getattr(self, 'all_uavs', []):
+                        if hasattr(pkt, 'tx_queue'):
+                            for other_packet in pkt.tx_queue:
+                                if other_packet is packet or other_packet.status == 'delivered':
+                                    continue
+                                if hasattr(other_packet, 'actual_hops') and len(other_packet.actual_hops) >= 2:
+                                    o_uav1 = self.uav_map.get(other_packet.actual_hops[-2])
+                                    o_uav2 = self.uav_map.get(other_packet.actual_hops[-1])
+                                    if o_uav1 and o_uav2:
+                                        if self.routing_model.are_vectors_concurrent(
+                                            (uav1.x, uav1.y), (uav2.x, uav2.y),
+                                            (o_uav1.x, o_uav1.y), (o_uav2.x, o_uav2.y)):
+                                            concurrent_penalty += self.routing_model.calculate_concurrent_region_delay(
+                                                (uav1.x, uav1.y), (uav2.x, uav2.y),
+                                                (o_uav1.x, o_uav1.y), (o_uav2.x, o_uav2.y))
+            # 静态：base+并发，动态：只base
+            packet.true_total_delay += base_delay + concurrent_penalty
+            if hasattr(packet, 'add_event'):
+                packet.add_event("true_hop_delay", packet.current_holder_id, packet.current_hop_index, self.sim_time, f"Add base_delay={base_delay}, concurrent_penalty={concurrent_penalty}")
+
         if packet.status != "delivered":
             receiver.add_packet_to_queue(packet)
         else:
             self._log(f"Pkt:{packet.id} DELIVERED to final destination {receiver.id}!")
-            # 新增：记录送达事件
             if hasattr(packet, 'add_event'):
                 packet.add_event("delivered", packet.current_holder_id, packet.current_hop_index, self.sim_time)
 
@@ -456,7 +474,7 @@ class MACLayer:
         """
         print(f"调用_handle_new_distance_interference, receiver_id={receiver_id}, senders={[s.id for s in senders]}")
         import simulation_config
-        use_dhytp = getattr(simulation_config, 'USE_DHYTP_ROUTING_MODEL', False)
+        use_ptp = getattr(simulation_config, 'USE_PTP_ROUTING_MODEL', False)
         if receiver_id not in self.distance_interference_queues or not self.distance_interference_queues[receiver_id]:
             self.distance_interference_queues[receiver_id] = deque(s.id for s in senders)
         else:
@@ -466,8 +484,8 @@ class MACLayer:
         for sender in senders:
             self.total_hop_attempts += 1
             packet = sender.tx_queue[0]
-            # 统计并发延时（仅在未用DHyTP模型时）
-            if not use_dhytp:
+            # 统计并发延时（仅在未用PTP模型时）
+            if not use_ptp:
                 if not hasattr(packet, 'concurrent_delay'):
                     packet.concurrent_delay = 0
                 packet.concurrent_delay += 1
@@ -561,6 +579,7 @@ class MACLayer:
         """
         self.packet_status_snapshot.clear()
         for packet in all_packets:
+            true_total_delay = getattr(packet, 'true_total_delay', 0.0)
             self.packet_status_snapshot.append({
                 'id': packet.id,
                 'source_id': packet.source_id,
@@ -571,8 +590,10 @@ class MACLayer:
                 'retransmission_count': packet.retransmission_count,
                 'actual_hops': list(packet.actual_hops),
                 'per_hop_waits': list(packet.per_hop_waits),
-                'event_history': list(packet.event_history),  # 新增：事件历史
-                'path': list(packet.path) if hasattr(packet, 'path') else [],  # 新增：完整路径
-                'concurrent_delay': getattr(packet, 'concurrent_delay', 0)  # 新增：并发延时
+                'event_history': list(packet.event_history),
+                'path': list(packet.path) if hasattr(packet, 'path') else [],
+                'concurrent_delay': getattr(packet, 'concurrent_delay', 0),
+                'true_total_delay': true_total_delay,
+                'total_delay': true_total_delay
             })
 
