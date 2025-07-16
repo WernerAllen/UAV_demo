@@ -13,8 +13,8 @@ UAV_MOVE_STEP_SIZE = 5  # 无人机每步移动距离 (米)
 
 ## **** MODIFICATION START: 新增方向持续时间配置 **** ##
 # 无人机将沿一个方向飞行的最短和最长时间 (秒)
-MIN_DIRECTION_TIME = 2.0  # 最少沿一个方向飞2秒
-MAX_DIRECTION_TIME = 10.0  # 最多沿一个方向飞10秒
+MIN_DIRECTION_TIME = 1.0  # 最少沿一个方向飞x秒
+MAX_DIRECTION_TIME = 5.0  # 最多沿一个方向飞y秒
 ## **** MODIFICATION END **** ##
 
 # 仿真默认参数
@@ -34,25 +34,24 @@ PRR_GRID_MAP = [
 ]
 
 # PTP模型开关，True则使用新模型计算路径权重，False则使用旧的地理距离
-USE_PTP_ROUTING_MODEL = True
-
+USE_PTP_ROUTING_MODEL = False
 # PRR丢包判定开关，True则启用PRR丢包/重传，False则只用EoD，不再PRR丢包
-USE_PRR_FAILURE_MODEL = False
+USE_PRR_FAILURE_MODEL = True
 
 # 并发区域检测阈值 
 CONCURRENCY_DISTANCE_THRESHOLD = 20.0  # (d_max) 判断并发的最大距离 (米)
 CONCURRENCY_ANGLE_THRESHOLD = 25.0   # (theta_max) 判断并发的最大夹角 (度)
 
 # EoD模型所需参数
-AVG_ONE_HOP_DISTANCE = 80.0 # (l_h^ave) 平均单跳通信距离，可以略小于通信范围
+AVG_ONE_HOP_DISTANCE = 90.0 # (l_h^ave) 平均单跳通信距离，可以略小于通信范围
 GRID_TRANSMISSION_ERROR = {   # (delta^t(z)) 每个网格的累积传输时间误差(秒)
     (0, 0): 0.01, (0, 1): 0.02, (0, 2): 0.01,
-    (1, 0): 0.03, (1, 1): 0.10, (1, 2): 0.03,
+    (1, 0): 0.03, (1, 1): 0.05, (1, 2): 0.03,
     (2, 0): 0.01, (2, 1): 0.02, (2, 2): 0.01,
 }
 
 # 重传次数上限
-MAX_RETRANSMISSIONS = 3
+MAX_RETRANSMISSIONS = 10
 
 # 位置变动检测阈值 (米)
 POSITION_CHANGE_THRESHOLD = 1.5  # 检测下一跳节点位置变动的阈值

@@ -99,67 +99,49 @@ class RoutingModel:
         return angle < CONCURRENCY_ANGLE_THRESHOLD
 
     # ## **** MODIFICATION START: 新增辅助函数并重写并发延迟计算 **** ##
-    def _get_grids_for_line(self, p1, p2):
+    def _get_grids_and_lengths_for_line(self, p1, p2):
         """
-        获取一条线段(p1 -> p2)穿过的所有网格。
-        使用数字微分分析(DDA)算法的简化版本。
+        获取一条线段(p1 -> p2)穿过的所有网格及其在每个网格内的实际穿越距离。
+        返回: dict {(row, col): length_in_grid}
         """
+        cell_width = MAX_X / GRID_COLS
+        cell_height = MAX_Y / GRID_ROWS
         x1, y1 = p1
         x2, y2 = p2
-        
-        grids = set()
-        
-        dx = x2 - x1
-        dy = y2 - y1
-        
-        steps = int(max(abs(dx), abs(dy)) / (MAX_X / (GRID_COLS * 5))) # 增加采样密度
-        if steps == 0:
-            row, col = self.get_grid_cell(x1, y1)
-            if row is not None:
-                grids.add((row, col))
-            return grids
-
-        x_inc = dx / steps
-        y_inc = dy / steps
-        
-        x, y = x1, y1
-        for _ in range(steps + 1):
+        grids = {}
+        # 采样足够密集，累加每个网格内的距离
+        total_dist = math.hypot(x2 - x1, y2 - y1)
+        steps = max(int(total_dist / min(cell_width, cell_height) * 10), 1)
+        prev_row, prev_col = None, None
+        prev_x, prev_y = x1, y1
+        for i in range(1, steps + 1):
+            t = i / steps
+            x = x1 + (x2 - x1) * t
+            y = y1 + (y2 - y1) * t
             row, col = self.get_grid_cell(x, y)
             if row is not None:
-                grids.add((row, col))
-            x += x_inc
-            y += y_inc
-            
+                if (row, col) not in grids:
+                    grids[(row, col)] = 0.0
+                # 累加上一步到这一步的距离
+                seg_len = math.hypot(x - prev_x, y - prev_y)
+                grids[(row, col)] += seg_len
+            prev_x, prev_y = x, y
         return grids
 
     def calculate_concurrent_region_delay(self, vec1_p1, vec1_q1, vec2_p2, vec2_q2):
         """
         估算并发区域的延迟 (公式17的实现)。
-        
-        Args:
-            vec1_p1, vec1_q1: 第一个向量的起点和终点
-            vec2_p2, vec2_q2: 第二个向量的起点和终点
         """
-        # 1. 找出两个向量各自穿过的网格集合
-        grids1 = self._get_grids_for_line(vec1_p1, vec1_q1)
-        grids2 = self._get_grids_for_line(vec2_p2, vec2_q2)
-        
+        # 1. 找出两个向量各自穿过的网格集合及长度
+        grids1 = self._get_grids_and_lengths_for_line(vec1_p1, vec1_q1)
+        grids2 = self._get_grids_and_lengths_for_line(vec2_p2, vec2_q2)
         # 2. 求交集，得到并发区域的网格 z
-        concurrent_grids = grids1.intersection(grids2)
-        
+        concurrent_grids = set(grids1.keys()).intersection(grids2.keys())
         if not concurrent_grids:
             return 0.0
-
         total_concurrent_delay = 0.0
-        
-        # 简化：假设在每个并发网格中，传输距离为该网格的对角线长度
-        cell_width = MAX_X / GRID_COLS
-        cell_height = MAX_Y / GRID_ROWS
-        distance_in_grid = math.sqrt(cell_width**2 + cell_height**2)
-
-        # 3. 遍历并发区域的每个网格z，累加其EoD
+        # 3. 遍历并发区域的每个网格z，累加其EoD（用实际穿越距离）
         for row, col in concurrent_grids:
-            # EoD^t(z)
-            total_concurrent_delay += self.calculate_eod_for_grid(distance_in_grid, row, col)
-            
+            length = min(grids1[(row, col)], grids2[(row, col)])  # 保守估计，取较小穿越长度
+            total_concurrent_delay += self.calculate_eod_for_grid(length, row, col)
         return total_concurrent_delay

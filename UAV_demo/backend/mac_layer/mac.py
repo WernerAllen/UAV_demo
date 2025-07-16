@@ -106,6 +106,99 @@ class MACLayer:
                         packet.add_event("concurrency_detected", packet.current_holder_id, packet.current_hop_index, self.sim_time, "collision")
             else:
                 transmitters_this_step.add(senders[0][0])
+        # --- 智能并发感知路由决策 ---
+        # 仅并发（无硬冲突）
+        for receiver_id, senders in receiver_to_senders.items():
+            if len(senders) == 1 and receiver_id not in interfered_receivers and receiver_id not in [cg[0] for cg in collision_groups]:
+                sender, packet = senders[0]
+                uav1 = sender
+                receiver = self.uav_map.get(receiver_id)
+                # 检查是否存在并发（与其他链路）
+                is_concurrent = False
+                penalty = 0.0
+                # 检查与所有其他包的当前跳是否并发
+                for other_uav in self.all_uavs:
+                    if other_uav.id == uav1.id or not other_uav.tx_queue:
+                        continue
+                    other_packet = other_uav.tx_queue[0]
+                    other_receiver_id = other_packet.get_next_hop_id()
+                    if other_receiver_id is None or other_receiver_id == receiver_id:
+                        continue
+                    other_receiver = self.uav_map.get(other_receiver_id)
+                    # 修正：确保所有对象都不为None
+                    if not (uav1 and receiver and other_uav and other_receiver):
+                        continue
+                    if hasattr(self.routing_model, 'are_vectors_concurrent') and self.routing_model.are_vectors_concurrent(
+                        (uav1.x, uav1.y), (receiver.x, receiver.y),
+                        (other_uav.x, other_uav.y), (other_receiver.x, other_receiver.y)):
+                        is_concurrent = True
+                        # 计算并发惩罚
+                        penalty = self.routing_model.calculate_concurrent_region_delay(
+                            (uav1.x, uav1.y), (receiver.x, receiver.y),
+                            (other_uav.x, other_uav.y), (other_receiver.x, other_receiver.y))
+                        break
+                if is_concurrent:
+                    # 1. 直闯并发区域的总时延
+                    base_delay = self.routing_model.get_link_base_delay(uav1, receiver)
+                    direct_total_delay = base_delay + penalty
+                    # 2. 遍历所有可用绕路路径，找最小时延
+                    # 这里只找一条最短非并发路径（可扩展为多路径）
+                    min_reroute_delay = float('inf')
+                    best_reroute_path = None
+                    # 用最短路径算法，临时屏蔽与当前并发链路重叠的路径
+                    # 这里只做简单实现：如果有其他路径且不与并发链路重叠就选
+                    # 获取所有路径的接口需你根据实际情况完善
+                    # 这里用原有get_shortest_path作为示例
+                    orig_path_ids, _ = self.sim_manager.get_shortest_path(uav1.id, receiver_id)
+                    if orig_path_ids and len(orig_path_ids) > 1:
+                        # 检查是否与并发链路重叠
+                        overlap = False
+                        for i in range(len(orig_path_ids) - 1):
+                            u1 = self.uav_map.get(orig_path_ids[i])
+                            u2 = self.uav_map.get(orig_path_ids[i+1])
+                            if not (uav1 and receiver and u1 and u2):
+                                continue
+                            else:
+                                seg1 = {(uav1.x, uav1.y), (receiver.x, receiver.y)}
+                                seg2 = {(u1.x, u1.y), (u2.x, u2.y)}
+                                if seg1 == seg2:
+                                    overlap = True
+                                    break
+                        if not overlap:
+                            reroute_delay = 0.0
+                            for i in range(len(orig_path_ids) - 1):
+                                u1 = self.uav_map.get(orig_path_ids[i])
+                                u2 = self.uav_map.get(orig_path_ids[i+1])
+                                if u1 is not None and u2 is not None:
+                                    reroute_delay += self.routing_model.get_link_base_delay(u1, u2)
+                                else:
+                                    reroute_delay = float('inf')
+                                    break
+                            if reroute_delay < min_reroute_delay:
+                                min_reroute_delay = reroute_delay
+                                best_reroute_path = orig_path_ids
+                    # 3. 比较
+                    if direct_total_delay <= min_reroute_delay:
+                        # 选择直闯，记录并发惩罚
+                        packet.last_concurrent_penalty = penalty
+                        if hasattr(packet, 'add_event'):
+                            packet.add_event("concurrent_decision", packet.current_holder_id, packet.current_hop_index, self.sim_time, f"Direct with penalty={penalty:.3f}")
+                        # 继续正常发送流程
+                    else:
+                        # 选择绕路，切换路径
+                        if best_reroute_path and len(best_reroute_path) > 1:
+                            current_hop_idx = packet.current_hop_index
+                            original_path = packet.path
+                            new_full_path = original_path[:current_hop_idx] + best_reroute_path + original_path[current_hop_idx + 2:]
+                            packet.path = new_full_path
+                            if hasattr(packet, 'add_event'):
+                                packet.add_event("reroute_success", sender.id, current_hop_idx, self.sim_time, f"Reroute via {best_reroute_path[1]}")
+                            for i in range(current_hop_idx, len(new_full_path) - 1):
+                                next_hop_id2 = new_full_path[i + 1]
+                                next_hop_uav = self.uav_map.get(next_hop_id2)
+                                if next_hop_uav:
+                                    packet.record_next_hop_position(next_hop_id2, next_hop_uav.x, next_hop_uav.y, next_hop_uav.z)
+                        # 继续正常发送流程
         # --- 队列合并规则 ---
         # 检查是否有节点同时在距离干扰和多对一冲突中
         collision_senders = set()
@@ -128,6 +221,20 @@ class MACLayer:
         # 重新识别本轮已被处理的发送者
         handled_senders = {s for s, p in interfered_senders} | {s for s, p in collision_senders}
         unhandled_senders = potential_senders - handled_senders
+        # 额外排除所有在冲突队列和干扰队列中的包
+        collision_queue_senders = set()
+        for queue in self.collision_queues.values():
+            for sender_id in queue:
+                sender_obj = self.uav_map.get(sender_id)
+                if sender_obj:
+                    collision_queue_senders.add(sender_obj)
+        distance_queue_senders = set()
+        for queue in self.distance_interference_queues.values():
+            for sender_id in queue:
+                sender_obj = self.uav_map.get(sender_id)
+                if sender_obj:
+                    distance_queue_senders.add(sender_obj)
+        unhandled_senders = unhandled_senders - collision_queue_senders - distance_queue_senders
         # 其余发送者正常尝试发送
         for sender in unhandled_senders:
             self.total_hop_attempts += 1
@@ -294,6 +401,15 @@ class MACLayer:
                 if not hasattr(packet, 'concurrent_delay'):
                     packet.concurrent_delay = 0
                 packet.concurrent_delay += 1
+                # 计算本跳并发惩罚（秒），并赋值到last_concurrent_penalty
+                if hasattr(self, 'routing_model'):
+                    uav1 = sender
+                    receiver = self.uav_map.get(receiver_id)
+                    if receiver:
+                        penalty = self.routing_model.calculate_concurrent_region_delay(
+                            (uav1.x, uav1.y), (receiver.x, receiver.y),
+                            (uav1.x, uav1.y), (receiver.x, receiver.y))
+                        packet.last_concurrent_penalty = penalty
             packet.retransmission_count += 1
             # 新增：记录重传事件
             if hasattr(packet, 'add_event'):
@@ -428,37 +544,21 @@ class MACLayer:
             packet.per_hop_waits.append(0)
         
         import simulation_config
-        # 统一统计true_total_delay，静态路径累加EoD+并发惩罚，动态路径只累加EoD
+        # 统一统计true_total_delay，基础时延和并发惩罚都用实际消耗的时间片累计
         if not hasattr(packet, 'true_total_delay'):
             packet.true_total_delay = 0.0
-        if len(packet.actual_hops) >= 2:
-            uav1 = self.uav_map.get(packet.actual_hops[-2])
-            uav2 = self.uav_map.get(packet.actual_hops[-1])
-            base_delay = 0.0
-            concurrent_penalty = 0.0
-            if uav1 and uav2 and hasattr(self, 'routing_model'):
-                base_delay = self.routing_model.get_link_base_delay(uav1, uav2)
-                if not getattr(simulation_config, 'USE_PTP_ROUTING_MODEL', False):
-                    # 静态路径才加并发惩罚
-                    for pkt in getattr(self, 'all_uavs', []):
-                        if hasattr(pkt, 'tx_queue'):
-                            for other_packet in pkt.tx_queue:
-                                if other_packet is packet or other_packet.status == 'delivered':
-                                    continue
-                                if hasattr(other_packet, 'actual_hops') and len(other_packet.actual_hops) >= 2:
-                                    o_uav1 = self.uav_map.get(other_packet.actual_hops[-2])
-                                    o_uav2 = self.uav_map.get(other_packet.actual_hops[-1])
-                                    if o_uav1 and o_uav2:
-                                        if self.routing_model.are_vectors_concurrent(
-                                            (uav1.x, uav1.y), (uav2.x, uav2.y),
-                                            (o_uav1.x, o_uav1.y), (o_uav2.x, o_uav2.y)):
-                                            concurrent_penalty += self.routing_model.calculate_concurrent_region_delay(
-                                                (uav1.x, uav1.y), (uav2.x, uav2.y),
-                                                (o_uav1.x, o_uav1.y), (o_uav2.x, o_uav2.y))
-            # 静态：base+并发，动态：只base
-            packet.true_total_delay += base_delay + concurrent_penalty
+        if hasattr(packet, 'per_hop_waits') and len(packet.per_hop_waits) >= 2:
+            # 统计上一跳实际等待的时间片数
+            time_increment = getattr(simulation_config, 'DEFAULT_TIME_INCREMENT', 0.1)
+            wait_steps = packet.per_hop_waits[-2]  # 刚完成的上一跳等待步数
+            # 理论换算并发惩罚为时间片
+            concurrent_penalty = getattr(packet, 'last_concurrent_penalty', 0.0)
+            concurrent_penalty_steps = math.ceil(concurrent_penalty / time_increment)
+            packet.true_total_delay += wait_steps * time_increment + concurrent_penalty_steps * time_increment
             if hasattr(packet, 'add_event'):
-                packet.add_event("true_hop_delay", packet.current_holder_id, packet.current_hop_index, self.sim_time, f"Add base_delay={base_delay}, concurrent_penalty={concurrent_penalty}")
+                packet.add_event("true_hop_delay", packet.current_holder_id, packet.current_hop_index, self.sim_time, f"Add wait_steps={wait_steps}, concurrent_penalty={concurrent_penalty}, concurrent_penalty_steps={concurrent_penalty_steps}")
+            # 累计后及时清零，避免影响下一跳
+            packet.last_concurrent_penalty = 0.0
 
         if packet.status != "delivered":
             receiver.add_packet_to_queue(packet)
@@ -489,6 +589,15 @@ class MACLayer:
                 if not hasattr(packet, 'concurrent_delay'):
                     packet.concurrent_delay = 0
                 packet.concurrent_delay += 1
+                # 计算本跳并发惩罚（秒），并赋值到last_concurrent_penalty
+                if hasattr(self, 'routing_model'):
+                    uav1 = sender
+                    receiver = self.uav_map.get(receiver_id)
+                    if receiver:
+                        penalty = self.routing_model.calculate_concurrent_region_delay(
+                            (uav1.x, uav1.y), (receiver.x, receiver.y),
+                            (uav1.x, uav1.y), (receiver.x, receiver.y))
+                        packet.last_concurrent_penalty = penalty
             packet.retransmission_count += 1
             # 新增：记录距离干扰重传事件
             if hasattr(packet, 'add_event'):

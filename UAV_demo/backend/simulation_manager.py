@@ -216,12 +216,13 @@ class SimulationManager:
     def _build_uav_graph(self):
         self.uav_graph = {uav.id: [] for uav in self.uavs}
         for i in range(len(self.uavs)):
-            for j in range(i + 1, len(self.uavs)):
+            for j in range(len(self.uavs)):
+                if i == j:
+                    continue
                 uav1, uav2 = self.uavs[i], self.uavs[j]
                 dist_sq = (uav1.x - uav2.x) ** 2 + (uav1.y - uav2.y) ** 2 + (uav1.z - uav2.z) ** 2
                 if dist_sq <= UAV_COMMUNICATION_RANGE ** 2:
                     self.uav_graph[uav1.id].append(uav2.id)
-                    self.uav_graph[uav2.id].append(uav1.id)
 
     def get_simulation_state(self):
         status_text = "idle"
