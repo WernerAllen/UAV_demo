@@ -2,6 +2,7 @@
 # 描述: 定义数据包的结构和行为
 
 from simulation_config import POSITION_CHANGE_THRESHOLD
+from simulation_config import USE_PTP_ROUTING_MODEL, USE_CTMP_ROUTING_MODEL
 
 class Packet:
     _id_counter = 0
@@ -73,10 +74,24 @@ class Packet:
                 self.delivery_time = sim_time - self.creation_time
 
     def add_event(self, event_type, holder_id, hop_index, sim_time, extra_info=""):
+        # 只保留核心事件
+        core_events = {"true_hop_delay", "position_change", "reroute_success", "delivered"}
+        if event_type not in core_events:
+            return
+        # 对reroute_success事件补充协议说明
+        info = extra_info
+        if event_type == "reroute_success":
+            if USE_CTMP_ROUTING_MODEL:
+                protocol_tag = "[CMTP]"
+            elif USE_PTP_ROUTING_MODEL:
+                protocol_tag = "[PTP]"
+            else:
+                protocol_tag = "[DIST]"
+            info = f"{protocol_tag} {extra_info}" if protocol_tag not in extra_info else extra_info
         self.event_history.append({
             "event": event_type,
             "holder": holder_id,
             "hop": hop_index,
             "sim_time": sim_time,
-            "info": extra_info
+            "info": info
         })

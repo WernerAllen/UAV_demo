@@ -17,14 +17,9 @@ class CommunicationModel:
         cell_width = MAX_X / GRID_COLS
         cell_height = MAX_Y / GRID_ROWS
         col_index = min(int(receiver_uav.x / cell_width), GRID_COLS - 1)
-        row_index = min(int(receiver_uav.y / cell_height), GRID_ROWS - 1)
+        row_index = min(int(receiver_uav.y / cell_height), GRID_COLS - 1)
         regional_prr = PRR_GRID_MAP[row_index][col_index]
         return random.random() > regional_prr
-
-    def check_mobility_failure(self, sender_uav, receiver_uav):
-        distance_sq = (sender_uav.x - receiver_uav.x) ** 2 + (sender_uav.y - receiver_uav.y) ** 2 + (
-                    sender_uav.z - receiver_uav.z) ** 2
-        return distance_sq > UAV_COMMUNICATION_RANGE ** 2
 
     
 
@@ -44,7 +39,7 @@ class RoutingModel:
         cell_width = MAX_X / GRID_COLS
         cell_height = MAX_Y / GRID_ROWS
         col = min(int(x / cell_width), GRID_COLS - 1)
-        row = min(int(y / cell_height), GRID_ROWS - 1)
+        row = min(int(y / cell_height), GRID_COLS - 1)
         return row, col
 
     def calculate_eod_for_grid(self, distance_in_grid, grid_row, grid_col):

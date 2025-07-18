@@ -5,6 +5,7 @@ import threading
 import time
 import math
 from simulation_manager import SimulationManager
+from simulation_config import USE_CTMP_ROUTING_MODEL
 
 
 def safe_float(val):
@@ -70,6 +71,8 @@ class ExperimentManager:
         MAX_STEPS_PER_ROUND = 20  # 最大步数保护，每步即为一个时间片
         valid_rounds = 0
         round_index = 0
+        self.total_delivery_time = 0.0
+        self.average_delivery_time = 0.0
         while valid_rounds < total_rounds:
             round_aborted = False  # 标记本轮是否异常终止
             round_index += 1
@@ -83,43 +86,42 @@ class ExperimentManager:
                 print(f"[实验进度] 平均耗时/轮: 0.00 秒")
             print(f"正在运行第 {valid_rounds + 1}/{total_rounds} 轮... (实际第{round_index}次尝试)")
             packets_this_round = []
-            
+
+            # -- CMTP协议统计建树+传输总时间 --
+            if USE_CTMP_ROUTING_MODEL:
+                round_start_time = time.time()
+                tree_build_start = time.time()
             # -- 在一个原子锁内完成一轮的准备工作 --
             with self.simulation_lock:
                 self.sim_manager.start_simulation(num_uavs=num_uavs) # 每轮开始时重置无人机位置
                 self.sim_manager.mac_layer.reset_counters()
-                
-                # 为当前轮次的所有S-D对寻找新路径并创建数据包
                 current_paths_this_round = []
                 for pair in sd_pairs:
                     source_id, dest_id = pair["source"], pair["destination"]
-                    
-                    # 重新寻找路径，因为UAV位置已重置
                     path_ids, _ = self.sim_manager.get_shortest_path(source_id, dest_id)
-                    
                     if path_ids:
                         current_paths_this_round.append({
                             "source": source_id,
                             "destination": dest_id,
                             "path": path_ids
                         })
-                        # 每个S-D对只发送一个数据包
                         created_packets, _ = self.sim_manager.initiate_data_transfer(
                             source_id, dest_id, packet_count=1
                         )
                         if created_packets:
                             packets_this_round.extend(created_packets)
-
-                # 更新状态，让前端可以查询到本轮的路径
                 self.current_round_paths = current_paths_this_round
-
                 if not packets_this_round:
                     self.current_status_message = f"第 {valid_rounds + 1} 轮跳过: 未能为任何源-目标对找到有效路径。"
                     time.sleep(0.5)
                     continue
+            if USE_CTMP_ROUTING_MODEL:
+                tree_build_end = time.time()
+                tree_build_time = tree_build_end - tree_build_start
 
             # -- 运行仿真直到本轮结束 --
-            round_start_time = time.time()
+            if not USE_CTMP_ROUTING_MODEL:
+                round_start_time = time.time()
             step_count = 0
             while True:
                 with self.simulation_lock:
@@ -129,34 +131,40 @@ class ExperimentManager:
                 step_count += 1
                 if step_count > MAX_STEPS_PER_ROUND:
                     self.current_status_message += f"（本轮超出最大步数{MAX_STEPS_PER_ROUND}，强制终止，未计入统计）"
-                    # 标记未送达包为失败
                     for pkt in packets_this_round:
                         if pkt.status != 'delivered':
                             pkt.status = 'failed_timeout'
                     round_aborted = True
                     break
                 time.sleep(0.001)
-            
+
+            round_end_time = time.time()
+
             # -- 在一个原子锁内完成统计更新 --
             with self.simulation_lock:
                 if not round_aborted:
-                    # 只有正常轮次才统计
                     self.sim_manager.mac_layer.collect_final_packet_status(packets_this_round)
                     import math
-                    delays = [pkt.get('total_delay', 0) for pkt in self.sim_manager.mac_layer.packet_status_snapshot]
-                    # 过滤掉inf、nan和None
-                    delays = [d for d in delays if d is not None and isinstance(d, (int, float)) and not (math.isinf(d) or math.isnan(d))]
-                    if delays:
-                        max_time_this_round = max(delays)
-                        self.total_time += max_time_this_round
+                    wait_times = [pkt.get('true_total_delay', 0) for pkt in self.sim_manager.mac_layer.packet_status_snapshot]
+                    wait_times = [w for w in wait_times if w is not None and isinstance(w, (int, float)) and not (math.isinf(w) or math.isnan(w))]
+                    delivery_times = [pkt.get('delivery_time', 0) for pkt in self.sim_manager.mac_layer.packet_status_snapshot if pkt.get('delivery_time', None) is not None]
+                    delivery_times = [d for d in delivery_times if isinstance(d, (int, float)) and not (math.isinf(d) or math.isnan(d))]
+                    if wait_times:
+                        max_wait_time_this_round = max(wait_times)
+                        # 只在CMTP模式下加建树时间
+                        if USE_CTMP_ROUTING_MODEL:
+                            max_wait_time_this_round += tree_build_time
+                        self.total_time += max_wait_time_this_round
                         valid_rounds += 1
                         if valid_rounds > 0:
                             self.average_time_per_round = self.total_time / valid_rounds
+                    if delivery_times:
+                        max_delivery_time_this_round = max(delivery_times)
+                        self.total_delivery_time += max_delivery_time_this_round
+                        self.average_delivery_time = self.total_delivery_time / valid_rounds if valid_rounds > 0 else 0.0
                     else:
-                        # 本轮无有效包，不计入统计
                         self.current_status_message += "（本轮无有效包，未计入统计）"
                 else:
-                    # 异常轮次不计入统计
                     pass
         self.current_status_message = f"实验完成！共执行 {valid_rounds} 轮。"
         self.is_running = False
@@ -168,7 +176,8 @@ class ExperimentManager:
             print("\n" + "="*80)
             print("实验完成！所有数据包的事件历史：")
             print("="*80)
-            
+            if USE_CTMP_ROUTING_MODEL:
+                print(f"[CMTP] 本轮建树时间: {tree_build_time:.4f} 秒")
             for pkt in self.sim_manager.packets_in_network:
                 print(f"\n数据包 {pkt.id} ({pkt.source_id} -> {pkt.destination_id}):")
                 print(f"  状态: {pkt.status}")
@@ -213,6 +222,8 @@ class ExperimentManager:
                 "completed_rounds": self.completed_rounds,
                 "total_time": safe_float(self.total_time),
                 "average_time_per_round": safe_float(self.average_time_per_round),
+                "total_delivery_time": getattr(self, 'total_delivery_time', 0.0),
+                "average_delivery_time": getattr(self, 'average_delivery_time', 0.0),
                 "message": self.current_status_message,
                 "current_paths": self.current_round_paths, # 新增字段
                 "final_paths": [

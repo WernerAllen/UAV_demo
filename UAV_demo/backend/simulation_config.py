@@ -33,8 +33,12 @@ PRR_GRID_MAP = [
     [0.80, 0.90, 0.85]
 ]
 
+# CMTP模型开关，True则使用CMTP路由，False则不用（论文MTP增强）
+USE_CTMP_ROUTING_MODEL = True
+
 # PTP模型开关，True则使用新模型计算路径权重，False则使用旧的地理距离
 USE_PTP_ROUTING_MODEL = False
+
 # PRR丢包判定开关，True则启用PRR丢包/重传，False则只用EoD，不再PRR丢包
 USE_PRR_FAILURE_MODEL = True
 

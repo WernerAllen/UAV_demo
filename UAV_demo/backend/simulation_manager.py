@@ -11,6 +11,7 @@ from core.packet import Packet
 from mac_layer.mac import MACLayer
 from simulation_config import *
 from models.communication_model import RoutingModel
+from protocols.cmtp_protocol import CMTPRoutingModel
 
 class SimulationManager:
     def __init__(self):
@@ -129,7 +130,7 @@ class SimulationManager:
     def get_shortest_path(self, source_uav_id, target_uav_id):
         """
         使用Dijkstra算法计算路径。
-        根据配置，权重可以是地理距离，也可以是DHyTP估算延迟。
+        根据配置，权重可以是地理距离、PTP模型或CMTP模型。
         """
         if not self.uavs: return None, "Simulation not active."
         
@@ -139,8 +140,12 @@ class SimulationManager:
         
         if source_uav_id == target_uav_id: return [source_uav_id], "Source and target are the same."
 
-        # 初始化路由模型（如果需要）
-        routing_model = RoutingModel(uav_map) if USE_PTP_ROUTING_MODEL else None
+        # 初始化路由模型（优先CMTP，其次PTP）
+        routing_model = None
+        if USE_CTMP_ROUTING_MODEL:
+            routing_model = CMTPRoutingModel(uav_map)
+        elif USE_PTP_ROUTING_MODEL:
+            routing_model = RoutingModel(uav_map)
 
         # Dijkstra算法初始化
         distances = {uav_id: float('inf') for uav_id in uav_map}
@@ -155,7 +160,12 @@ class SimulationManager:
                 continue
             
             if current_id == target_uav_id:
-                unit = "s" if USE_PTP_ROUTING_MODEL else "m"
+                if USE_CTMP_ROUTING_MODEL:
+                    unit = "s"  # CMTP权重为延迟
+                elif USE_PTP_ROUTING_MODEL:
+                    unit = "s"
+                else:
+                    unit = "m"
                 return path, f"Path found with total weight: {dist:.2f}{unit}."
 
             current_uav = uav_map[current_id]
@@ -164,36 +174,30 @@ class SimulationManager:
                 
                 # --- 核心修改：计算边的权重 ---
                 edge_weight = 0.0
-                if USE_PTP_ROUTING_MODEL and routing_model:
-                    # 使用PTP模型计算估算延迟作为权重
-                    
-                    # 1. 计算基础链路延迟 (EoD之和)
+                if USE_CTMP_ROUTING_MODEL and routing_model:
+                    # 使用CMTP模型计算估算延迟作为权重
                     edge_weight = routing_model.get_link_base_delay(current_uav, neighbor_uav)
-
+                    # 可扩展：调用CMTP的拥塞感知延迟等
+                elif USE_PTP_ROUTING_MODEL and routing_model:
+                    # 使用PTP模型计算估算延迟作为权重
+                    edge_weight = routing_model.get_link_base_delay(current_uav, neighbor_uav)
                     # 2. 计算并发区域带来的额外延迟
-                    # 检查此链路是否与网络中其他数据包的当前跳有并发
                     concurrent_delay = 0.0
                     link_p1 = (current_uav.x, current_uav.y)
                     link_q1 = (neighbor_uav.x, neighbor_uav.y)
-
                     for pkt in self.packets_in_network:
-                        # 排除发往此邻居的包或已送达的包
                         if pkt.status == 'delivered' or pkt.get_next_hop_id() == neighbor_id:
                             continue
-                        
                         holder = self.mac_layer.uav_map.get(pkt.current_holder_id)
                         next_hop = self.mac_layer.uav_map.get(pkt.get_next_hop_id())
-
                         if holder and next_hop:
                             pkt_p2 = (holder.x, holder.y)
                             pkt_q2 = (next_hop.x, next_hop.y)
                             if routing_model.are_vectors_concurrent(link_p1, link_q1, pkt_p2, pkt_q2):
-                                # 如果并发，累加惩罚性延迟
                                 concurrent_delay += routing_model.calculate_concurrent_region_delay(
                                     link_p1, link_q1, pkt_p2, pkt_q2
                                 )
                     edge_weight += concurrent_delay
-
                 else:
                     # 使用旧的地理距离作为权重
                     edge_weight = math.sqrt(

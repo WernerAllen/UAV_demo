@@ -589,6 +589,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (statusData) {
             expTotalTime.textContent = (statusData.total_time || 0).toFixed(2);
             expAvgTime.textContent = (statusData.average_time_per_round || 0).toFixed(2);
+            document.getElementById('expTotalDeliveryTime').textContent = (statusData.total_delivery_time || 0).toFixed(2);
+            document.getElementById('expAvgDeliveryTime').textContent = (statusData.average_delivery_time || 0).toFixed(2);
         }
         
         if (statusData.completed_rounds > previousExperimentStatus.completed_rounds) {
