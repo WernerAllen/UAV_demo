@@ -10,7 +10,7 @@ class Packet:
     @classmethod
     def _generate_id(cls):
         cls._id_counter += 1
-        return f"pkt_{cls._id_counter}"
+        return f"pkt{cls._id_counter}"  # 修改这里，去掉下划线，使格式与显示一致
 
     @classmethod
     def reset_id_counter(cls):
@@ -33,6 +33,9 @@ class Packet:
         # ## **** MODIFICATION START: 添加下一跳位置记录 **** ##
         self.next_hop_positions = {}  # 记录每个下一跳节点的位置 {hop_id: (x, y, z)}
         # ## **** MODIFICATION END **** ##
+        # ## **** AoI MODIFICATION START: 添加AoI相关属性 **** ##
+        self.aoi = None  # 数据包的AoI值（送达时计算）
+        # ## **** AoI MODIFICATION END **** ##
 
     def get_next_hop_id(self):
         if self.path and 0 <= self.current_hop_index < len(self.path) - 1:
@@ -72,12 +75,29 @@ class Packet:
             self.status = "delivered"
             if sim_time is not None:
                 self.delivery_time = sim_time - self.creation_time
+                # ## **** AoI MODIFICATION START: 计算AoI **** ##
+                self.aoi = sim_time - self.creation_time  # AoI = 当前时间 - 生成时间
+                # ## **** AoI MODIFICATION END **** ##
 
     def add_event(self, event_type, holder_id, hop_index, sim_time, extra_info=""):
-        # 只保留核心事件
-        core_events = {"true_hop_delay", "position_change", "reroute_success", "delivered"}
-        if event_type not in core_events:
+        # 扩展允许记录的核心事件类型
+        core_events = {
+            "true_hop_delay", "position_change", "reroute_success", "delivered", 
+            "retransmit", "collision", "prr_failure", "distance_interference", 
+            "max_retries", "waiting"
+        }
+        
+        if event_type not in core_events and not event_type.startswith("fail_"):
             return
+        
+        # 检查是否已经在相同时间点记录了相同类型的事件，避免重复
+        for event in self.event_history:
+            if (event["event"] == event_type and 
+                event["sim_time"] == sim_time and 
+                event["hop"] == hop_index):
+                # 同一时间点、同一跳数、同一事件类型，不重复记录
+                return
+        
         # 对reroute_success事件补充协议说明
         info = extra_info
         if event_type == "reroute_success":
@@ -88,6 +108,7 @@ class Packet:
             else:
                 protocol_tag = "[DIST]"
             info = f"{protocol_tag} {extra_info}" if protocol_tag not in extra_info else extra_info
+        
         self.event_history.append({
             "event": event_type,
             "holder": holder_id,

@@ -2,29 +2,71 @@
 # 描述: PTP 路由协议实现 (原 RoutingModel)
 
 import math
+import random
 import numpy as np
 from simulation_config import *
 
-class RoutingModel:
+class PTPRoutingModel:
     """
     实现论文中提出的PTP相关估算模型
     """
     def __init__(self, uav_map):
         self.uav_map = uav_map
+        # 初始化PTP专用PRR网格
+        self.ptp_prr_grid = None
+        if hasattr(globals(), 'PTP_USE_RANDOM_PRR') and PTP_USE_RANDOM_PRR:
+            self._initialize_random_prr_grid()
+
+    def _initialize_random_prr_grid(self):
+        """初始化随机PRR网格"""
+        rows = getattr(globals(), 'PTP_GRID_ROWS', GRID_ROWS)
+        cols = getattr(globals(), 'PTP_GRID_COLS', GRID_COLS)
+        prr_min = getattr(globals(), 'PTP_PRR_MIN', 0.5)
+        prr_max = getattr(globals(), 'PTP_PRR_MAX', 0.9)
+        
+        self.ptp_prr_grid = []
+        for _ in range(rows):
+            row = []
+            for _ in range(cols):
+                row.append(random.uniform(prr_min, prr_max))
+            self.ptp_prr_grid.append(row)
+        
+        print(f"已初始化PTP随机PRR网格 ({rows}x{cols})，PRR范围: {prr_min}-{prr_max}")
 
     def get_grid_cell(self, x, y):
         if not (0 <= x < MAX_X and 0 <= y < MAX_Y):
             return None, None
-        cell_width = MAX_X / GRID_COLS
-        cell_height = MAX_Y / GRID_ROWS
-        col = min(int(x / cell_width), GRID_COLS - 1)
-        row = min(int(y / cell_height), GRID_ROWS - 1)
+            
+        # 使用PTP专用网格尺寸（如果定义了）
+        rows = getattr(globals(), 'PTP_GRID_ROWS', GRID_ROWS)
+        cols = getattr(globals(), 'PTP_GRID_COLS', GRID_COLS)
+        
+        cell_width = MAX_X / cols
+        cell_height = MAX_Y / rows
+        col = min(int(x / cell_width), cols - 1)
+        row = min(int(y / cell_height), rows - 1)
         return row, col
 
     def calculate_eod_for_grid(self, distance_in_grid, grid_row, grid_col):
-        if AVG_ONE_HOP_DISTANCE == 0 or PRR_GRID_MAP[grid_row][grid_col] == 0:
+        # 获取PRR值，优先使用PTP专用随机PRR网格
+        if self.ptp_prr_grid is not None:
+            rows = len(self.ptp_prr_grid)
+            cols = len(self.ptp_prr_grid[0]) if rows > 0 else 0
+            
+            if 0 <= grid_row < rows and 0 <= grid_col < cols:
+                prr = self.ptp_prr_grid[grid_row][grid_col]
+            else:
+                prr = 0.7  # 默认值
+        else:
+            # 使用全局PRR网格
+            if grid_row >= len(PRR_GRID_MAP) or grid_col >= len(PRR_GRID_MAP[0]):
+                prr = 0.7  # 默认值
+            else:
+                prr = PRR_GRID_MAP[grid_row][grid_col]
+        
+        if AVG_ONE_HOP_DISTANCE == 0 or prr == 0:
             return float('inf')
-        prr = PRR_GRID_MAP[grid_row][grid_col]
+            
         error_term = GRID_TRANSMISSION_ERROR.get((grid_row, grid_col), 0.01)
         estimated_time = (distance_in_grid / (AVG_ONE_HOP_DISTANCE * prr)) + error_term
         return estimated_time
@@ -55,8 +97,12 @@ class RoutingModel:
         return angle < CONCURRENCY_ANGLE_THRESHOLD
 
     def _get_grids_and_lengths_for_line(self, p1, p2):
-        cell_width = MAX_X / GRID_COLS
-        cell_height = MAX_Y / GRID_ROWS
+        # 使用PTP专用网格尺寸（如果定义了）
+        rows = getattr(globals(), 'PTP_GRID_ROWS', GRID_ROWS)
+        cols = getattr(globals(), 'PTP_GRID_COLS', GRID_COLS)
+        
+        cell_width = MAX_X / cols
+        cell_height = MAX_Y / rows
         x1, y1 = p1
         x2, y2 = p2
         grids = {}

@@ -10,8 +10,10 @@ from core.uav import UAV
 from core.packet import Packet
 from mac_layer.mac import MACLayer
 from simulation_config import *
-from models.communication_model import RoutingModel
+from models.communication_model import CommunicationModel
+from protocols.ptp_protocol import PTPRoutingModel
 from protocols.cmtp_protocol import CMTPRoutingModel
+from protocols.dhytp_protocol import DHyTPRoutingModel
 
 class SimulationManager:
     def __init__(self):
@@ -26,6 +28,20 @@ class SimulationManager:
         # ## **** MODIFICATION START: 将sim_manager实例传给MAC层 **** ##
         self.mac_layer = MACLayer(self.uavs, self)
         # ## **** MODIFICATION END **** ##
+
+        # 初始化路由模型
+        if USE_DHYTP_ROUTING_MODEL:
+            self.routing_model = DHyTPRoutingModel(self.mac_layer.uav_map)
+            print("DHyTP路由模型已初始化")
+        elif USE_CTMP_ROUTING_MODEL:
+            self.routing_model = CMTPRoutingModel(self.mac_layer.uav_map)
+            print("CMTP路由模型已初始化")
+        elif USE_PTP_ROUTING_MODEL:
+            self.routing_model = PTPRoutingModel(self.mac_layer.uav_map)
+            print("PTP路由模型已初始化")
+        else:
+            self.routing_model = None
+            print("未使用任何路由模型")
 
         self.last_uav_count = DEFAULT_NUM_UAVS
 
@@ -51,6 +67,24 @@ class SimulationManager:
         self.mac_layer.update_uav_list(self.uavs)
         self._build_uav_graph()
         self.is_running = True
+        
+        # 重新初始化路由模型
+        if USE_DHYTP_ROUTING_MODEL:
+            self.routing_model = DHyTPRoutingModel(self.mac_layer.uav_map)
+            print("DHyTP路由模型已重新初始化")
+        elif USE_CTMP_ROUTING_MODEL:
+            self.routing_model = CMTPRoutingModel(self.mac_layer.uav_map)
+            print("CMTP路由模型已重新初始化")
+        elif USE_PTP_ROUTING_MODEL:
+            self.routing_model = PTPRoutingModel(self.mac_layer.uav_map)
+            print("PTP路由模型已重新初始化")
+        else:
+            self.routing_model = None
+            print("未使用任何路由模型")
+        
+        # 确保MAC层也使用相同的路由模型
+        self.mac_layer.routing_model = self.routing_model
+        
         return f"{len(self.uavs)} UAVs created. Simulation started/reset."
 
     def step_simulation(self, time_increment=None):
@@ -87,6 +121,13 @@ class SimulationManager:
                 if next_hop_uav:
                     packet.record_next_hop_position(next_hop_id, next_hop_uav.x, next_hop_uav.y, next_hop_uav.z)
             # ## **** MODIFICATION END **** ##
+            
+            # 如果使用DHyTP路由，记录初始路由状态
+            if USE_DHYTP_ROUTING_MODEL and isinstance(self.routing_model, DHyTPRoutingModel):
+                self.routing_model.update_protocol_status([destination_id], self.simulation_time)
+                if hasattr(packet, 'add_event'):
+                    packet.add_event("dhytp_init", source_id, 0, self.simulation_time, 
+                                    f"DHyTP初始化, tree_progress={self.routing_model.tree_build_progress:.2f}")
             
             self.packets_in_network.append(packet)
             source_uav.add_packet_to_queue(packet)
@@ -130,7 +171,7 @@ class SimulationManager:
     def get_shortest_path(self, source_uav_id, target_uav_id):
         """
         使用Dijkstra算法计算路径。
-        根据配置，权重可以是地理距离、PTP模型或CMTP模型。
+        根据配置，权重可以是地理距离、PTP模型、CMTP模型或DHyTP模型。
         """
         if not self.uavs: return None, "Simulation not active."
         
@@ -140,12 +181,16 @@ class SimulationManager:
         
         if source_uav_id == target_uav_id: return [source_uav_id], "Source and target are the same."
 
-        # 初始化路由模型（优先CMTP，其次PTP）
+        # 初始化路由模型（优先DHyTP，其次CMTP/PTP）
         routing_model = None
-        if USE_CTMP_ROUTING_MODEL:
+        if hasattr(self, 'routing_model') and self.routing_model is not None:
+            routing_model = self.routing_model
+        elif USE_DHYTP_ROUTING_MODEL:
+            routing_model = DHyTPRoutingModel(uav_map)
+        elif USE_CTMP_ROUTING_MODEL:
             routing_model = CMTPRoutingModel(uav_map)
         elif USE_PTP_ROUTING_MODEL:
-            routing_model = RoutingModel(uav_map)
+            routing_model = PTPRoutingModel(uav_map)
 
         # Dijkstra算法初始化
         distances = {uav_id: float('inf') for uav_id in uav_map}
@@ -160,10 +205,8 @@ class SimulationManager:
                 continue
             
             if current_id == target_uav_id:
-                if USE_CTMP_ROUTING_MODEL:
-                    unit = "s"  # CMTP权重为延迟
-                elif USE_PTP_ROUTING_MODEL:
-                    unit = "s"
+                if USE_DHYTP_ROUTING_MODEL or USE_CTMP_ROUTING_MODEL or USE_PTP_ROUTING_MODEL:
+                    unit = "s"  # 权重为延迟
                 else:
                     unit = "m"
                 return path, f"Path found with total weight: {dist:.2f}{unit}."
@@ -171,44 +214,19 @@ class SimulationManager:
             current_uav = uav_map[current_id]
             for neighbor_id in self.uav_graph.get(current_id, []):
                 neighbor_uav = uav_map[neighbor_id]
-                
                 # --- 核心修改：计算边的权重 ---
                 edge_weight = 0.0
-                if USE_CTMP_ROUTING_MODEL and routing_model:
-                    # 使用CMTP模型计算估算延迟作为权重
+                if isinstance(routing_model, DHyTPRoutingModel):
+                    edge_weight = routing_model.cmtp.get_link_base_delay(current_uav, neighbor_uav)
+                elif routing_model is not None and hasattr(routing_model, 'get_link_base_delay'):
                     edge_weight = routing_model.get_link_base_delay(current_uav, neighbor_uav)
-                    # 可扩展：调用CMTP的拥塞感知延迟等
-                elif USE_PTP_ROUTING_MODEL and routing_model:
-                    # 使用PTP模型计算估算延迟作为权重
-                    edge_weight = routing_model.get_link_base_delay(current_uav, neighbor_uav)
-                    # 2. 计算并发区域带来的额外延迟
-                    concurrent_delay = 0.0
-                    link_p1 = (current_uav.x, current_uav.y)
-                    link_q1 = (neighbor_uav.x, neighbor_uav.y)
-                    for pkt in self.packets_in_network:
-                        if pkt.status == 'delivered' or pkt.get_next_hop_id() == neighbor_id:
-                            continue
-                        holder = self.mac_layer.uav_map.get(pkt.current_holder_id)
-                        next_hop = self.mac_layer.uav_map.get(pkt.get_next_hop_id())
-                        if holder and next_hop:
-                            pkt_p2 = (holder.x, holder.y)
-                            pkt_q2 = (next_hop.x, next_hop.y)
-                            if routing_model.are_vectors_concurrent(link_p1, link_q1, pkt_p2, pkt_q2):
-                                concurrent_delay += routing_model.calculate_concurrent_region_delay(
-                                    link_p1, link_q1, pkt_p2, pkt_q2
-                                )
-                    edge_weight += concurrent_delay
                 else:
-                    # 使用旧的地理距离作为权重
                     edge_weight = math.sqrt(
                         (current_uav.x - neighbor_uav.x)**2 +
                         (current_uav.y - neighbor_uav.y)**2 +
                         (current_uav.z - neighbor_uav.z)**2
                     )
-                # --- 权重计算结束 ---
-
                 new_dist = dist + edge_weight
-                
                 if new_dist < distances[neighbor_id]:
                     distances[neighbor_id] = new_dist
                     entry_count += 1
@@ -235,17 +253,46 @@ class SimulationManager:
         elif self.uavs:
             status_text = "paused/stopped"
 
-        return {
+        # 基本状态信息
+        state = {
             "status": status_text,
             "time": self.simulation_time,
             "uavs": [uav.get_data_for_api() for uav in self.uavs],
             "packets": [p.__dict__ for p in self.packets_in_network],
             "mac_packet_status": self.mac_layer.get_packet_status_snapshot(),
-            'grid_config': {
-                'rows': GRID_ROWS, 'cols': GRID_COLS, 'prr_map': PRR_GRID_MAP,
-                'width': MAX_X, 'height': MAX_Y
-            }
         }
+
+        # 只有PTP协议才返回网格配置
+        if USE_PTP_ROUTING_MODEL:
+            grid_rows = PTP_GRID_ROWS
+            grid_cols = PTP_GRID_COLS
+            
+            # 如果使用随机PRR，则生成一个随机PRR网格
+            if PTP_USE_RANDOM_PRR:
+                # 动态生成PRR网格
+                prr_grid = []
+                for r in range(grid_rows):
+                    row = []
+                    for c in range(grid_cols):
+                        # 在最小值和最大值之间生成随机PRR
+                        prr = PTP_PRR_MIN + random.random() * (PTP_PRR_MAX - PTP_PRR_MIN)
+                        row.append(round(prr, 2))
+                    prr_grid.append(row)
+                prr_map = prr_grid
+            else:
+                # 使用配置中的PRR网格
+                prr_map = PRR_GRID_MAP
+
+            # 添加网格配置到状态信息
+            state['grid_config'] = {
+                'rows': grid_rows, 
+                'cols': grid_cols, 
+                'prr_map': prr_map,
+                'width': MAX_X, 
+                'height': MAX_Y
+            }
+
+        return state
 
     # ## **** MODIFICATION START: 添加打印数据包事件历史的方法 **** ##
     def print_packet_event_history(self):

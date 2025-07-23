@@ -12,7 +12,7 @@ class CMTPRoutingModel:
     """
     # 论文MTP增强参数
     ETX_UPDATE_THRESHOLD = 0.3  # ETX变化阈值，超过才更新树
-    MERGE_DISTANCE_THRESHOLD = 40  # 目标节点合并树的距离阈值
+    MERGE_DISTANCE_THRESHOLD = 30  # 目标节点合并树的距离阈值
 
     def __init__(self, uav_map):
         self.uav_map = uav_map
@@ -165,6 +165,16 @@ class CMTPRoutingModel:
             candidates_str = ', '.join([f"{nid}:{ett_map[nid]:.3f}" for nid in ett_map])
             info = f"candidates=[{candidates_str}], selected={getattr(best_neighbor, 'id', None)}, ett={min_ett:.3f}"
             packet.add_event("cmtp_path_select", getattr(current_uav, 'id', None), getattr(packet, 'current_hop_index', None), sim_time if sim_time is not None else 0, info)
+        
+        # 注释掉这里的输出，将在数据包传输成功后显示
+        # if best_neighbor:
+        #     # 计算进度值：ETT越小，进度越高，最大为1.0
+        #     if min_ett > 0:
+        #         progress = min(1.0, 1.0 / min_ett)  # ETT的倒数，限制最大值为1.0
+        #     else:
+        #         progress = 1.0
+        #     print(f"【CMTP】 UAV-{current_uav.id}→{best_neighbor.id} 选择→UAV-{best_neighbor.id} 进度:{progress:.2f}")
+            
         return best_neighbor, min_ett
 
     def get_link_base_delay(self, uav1, uav2=None, root_id=None):

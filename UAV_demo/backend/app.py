@@ -1,16 +1,53 @@
 # 文件: backend/app.py (已更新)
 # 描述: 增加新API端点，并修改实验开始接口
 
+import importlib
+
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+
 from experiment_manager import ExperimentManager
 from simulation_config import API_DEFAULT_PORT
+import simulation_config
 
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 exp_manager = ExperimentManager()
 sim_manager = exp_manager.sim_manager
+
+# ## **** NEW ENDPOINT: 设置路由模型 **** ##
+@app.route('/api/simulation/set-routing-model', methods=['POST'])
+def set_routing_model_endpoint():
+    if exp_manager.is_running:
+        return jsonify({"error": "实验进行中，无法更改路由模型"}), 409
+    if not request.json:
+        return jsonify({"error": "无效的JSON数据"}), 400
+    
+    model = request.json.get('model', '').upper()
+    if model not in ["DHYTP", "CMTP", "PTP", "NONE"]:
+        return jsonify({"error": "无效的路由模型，必须是 DHYTP、CMTP、PTP 或 NONE"}), 400
+    
+    # 动态修改simulation_config中的值
+    simulation_config.ROUTING_MODEL = model
+    simulation_config.USE_DHYTP_ROUTING_MODEL = model == "DHYTP"
+    simulation_config.USE_CTMP_ROUTING_MODEL = model == "CMTP"
+    simulation_config.USE_PTP_ROUTING_MODEL = model == "PTP"
+    
+    # 重新加载模块以确保更改生效
+    importlib.reload(simulation_config)
+    
+    # 重启仿真以应用新的路由模型
+    with exp_manager.simulation_lock:
+        status_message = sim_manager.start_simulation()
+        current_sim_state = sim_manager.get_simulation_state()
+    
+    return jsonify({
+        "status_message": f"路由模型已设置为 {model}，仿真已重启",
+        "current_state": current_sim_state,
+        "routing_model": model
+    })
+# ## **** NEW ENDPOINT END **** ##
 
 
 @app.route('/api/simulation/start', methods=['POST'])

@@ -72,6 +72,7 @@ document.addEventListener('DOMContentLoaded', () => {
             updateUAVMap(currentUAVs);
             currentPackets = stateData.packets || [];
         }
+        // 如果有网格配置则更新，否则设置为null（非PTP协议）
         currentGridConfig = stateData.grid_config || null;
         // 优先mac_packet_status，其次mac_log，展示格式不变
         if (stateData.mac_packet_status) {
@@ -93,6 +94,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function redrawCanvas() {
         if (!ctx) return;
         ctx.clearRect(0, 0, canvas.width, canvas.height);
+        // 只有当currentGridConfig存在时才绘制网格背景（PTP协议）
         if (currentGridConfig) drawGridBackground();
         if (currentUAVs) currentUAVs.forEach(drawUAV);
         if (staticExperimentPaths && staticExperimentPaths.length > 0) {
@@ -542,29 +544,26 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function handleStartExperimentClick() {
-        if (staticExperimentPaths.length === 0) {
-            displayMessage("请先生成有效的源-目标对。", true);
+        const totalRounds = parseInt(expRoundsInput.value, 10) || 1;
+        if (!staticExperimentPaths || staticExperimentPaths.length === 0) {
+            displayMessage("请先生成源-目标对。", true);
             return;
         }
+        
         setManualControlsDisabled(true);
-        startExperimentButton.disabled = true;
-        
-        allExperimentRoundsData = [{ round: "初始", paths: staticExperimentPaths }];
-        previousExperimentStatus = { completed_rounds: 0, current_paths: staticExperimentPaths };
-        
-        const totalRounds = parseInt(expRoundsInput.value);
-        expTotalRounds.textContent = totalRounds;
-        
         displayMessage("正在启动批处理实验...", false);
-
-        const params = {
+        
+        // 更新总轮数显示
+        document.getElementById('expTotalRounds').textContent = totalRounds;
+        
+        const result = await apiCall('experiment/start', 'POST', {
             total_rounds: totalRounds,
             pairs: staticExperimentPaths,
-            num_uavs: parseInt(numUAVsInput.value)
-        };
-        const result = await apiCall('experiment/start', 'POST', params);
-
+            num_uavs: parseInt(numUAVsInput.value, 10) || DEFAULT_NUM_UAVS
+        });
+        
         if (result && result.ok) {
+            previousExperimentStatus = { completed_rounds: 0, current_paths: [] };
             displayMessage(result.data.message, false);
             experimentPollingInterval = setInterval(pollExperimentStatus, 200);
         } else {
@@ -585,12 +584,14 @@ document.addEventListener('DOMContentLoaded', () => {
         
         expStatusMessage.textContent = statusData.message;
         expCompletedRounds.textContent = statusData.completed_rounds;
-        // 替换跳数统计赋值为耗时统计
+        // 只显示送达时间统计
         if (statusData) {
-            expTotalTime.textContent = (statusData.total_time || 0).toFixed(2);
-            expAvgTime.textContent = (statusData.average_time_per_round || 0).toFixed(2);
             document.getElementById('expTotalDeliveryTime').textContent = (statusData.total_delivery_time || 0).toFixed(2);
             document.getElementById('expAvgDeliveryTime').textContent = (statusData.average_delivery_time || 0).toFixed(2);
+            // ## **** AoI MODIFICATION START: 更新AoI统计显示 **** ##
+            document.getElementById('expTotalAoI').textContent = (statusData.total_aoi || 0).toFixed(2);
+            document.getElementById('expAvgAoI').textContent = (statusData.average_aoi || 0).toFixed(2);
+            // ## **** AoI MODIFICATION END **** ##
         }
         
         if (statusData.completed_rounds > previousExperimentStatus.completed_rounds) {

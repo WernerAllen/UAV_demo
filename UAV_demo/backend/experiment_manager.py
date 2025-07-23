@@ -36,6 +36,10 @@ class ExperimentManager:
         self.current_status_message = "空闲"
         self.current_round_paths = [] # 存储当前轮次所有S-D对的路径
         self.all_round_actual_paths = []  # 新增：所有轮的实际路径
+        # ## **** AoI MODIFICATION START: 添加AoI相关统计变量 **** ##
+        self.total_aoi = 0.0
+        self.average_aoi = 0.0
+        # ## **** AoI MODIFICATION END **** ##
 
     # ## **** MODIFICATION START: 改变接口以接收S-D对列表 **** ##
     def start_experiment(self, total_rounds, pairs_data, num_uavs):
@@ -73,17 +77,30 @@ class ExperimentManager:
         round_index = 0
         self.total_delivery_time = 0.0
         self.average_delivery_time = 0.0
+        # ## **** AoI MODIFICATION START: 重置AoI统计 **** ##
+        self.total_aoi = 0.0
+        self.average_aoi = 0.0
+        # ## **** AoI MODIFICATION END **** ##
         while valid_rounds < total_rounds:
             round_aborted = False  # 标记本轮是否异常终止
             round_index += 1
             self.current_status_message = f"正在运行第 {valid_rounds + 1}/{total_rounds} 轮..."
             print(f"[实验进度] 状态: {self.current_status_message}")
             print(f"[实验进度] 进度: {valid_rounds} / {total_rounds}")
-            print(f"[实验进度] 总耗时: {self.total_time:.2f} 秒")
+            print(f"[实验进度] 总送达时间: {self.total_delivery_time:.2f} 秒")
+            # ## **** AoI MODIFICATION START: 显示AoI统计 **** ##
+            print(f"[实验进度] 总AoI: {self.total_aoi:.2f}")
+            # ## **** AoI MODIFICATION END **** ##
             if valid_rounds > 0:
-                print(f"[实验进度] 平均耗时/轮: {self.average_time_per_round:.2f} 秒")
+                print(f"[实验进度] 平均送达时间/轮: {self.average_delivery_time:.2f} 秒")
+                # ## **** AoI MODIFICATION START: 显示平均AoI **** ##
+                print(f"[实验进度] 平均AoI/轮: {self.average_aoi:.2f}")
+                # ## **** AoI MODIFICATION END **** ##
             else:
-                print(f"[实验进度] 平均耗时/轮: 0.00 秒")
+                print(f"[实验进度] 平均送达时间/轮: 0.00 秒")
+                # ## **** AoI MODIFICATION START: 显示平均AoI初始值 **** ##
+                print(f"[实验进度] 平均AoI/轮: 0.00")
+                # ## **** AoI MODIFICATION END **** ##
             print(f"正在运行第 {valid_rounds + 1}/{total_rounds} 轮... (实际第{round_index}次尝试)")
             packets_this_round = []
 
@@ -145,23 +162,28 @@ class ExperimentManager:
                 if not round_aborted:
                     self.sim_manager.mac_layer.collect_final_packet_status(packets_this_round)
                     import math
-                    wait_times = [pkt.get('true_total_delay', 0) for pkt in self.sim_manager.mac_layer.packet_status_snapshot]
-                    wait_times = [w for w in wait_times if w is not None and isinstance(w, (int, float)) and not (math.isinf(w) or math.isnan(w))]
                     delivery_times = [pkt.get('delivery_time', 0) for pkt in self.sim_manager.mac_layer.packet_status_snapshot if pkt.get('delivery_time', None) is not None]
                     delivery_times = [d for d in delivery_times if isinstance(d, (int, float)) and not (math.isinf(d) or math.isnan(d))]
-                    if wait_times:
-                        max_wait_time_this_round = max(wait_times)
-                        # 只在CMTP模式下加建树时间
-                        if USE_CTMP_ROUTING_MODEL:
-                            max_wait_time_this_round += tree_build_time
-                        self.total_time += max_wait_time_this_round
-                        valid_rounds += 1
-                        if valid_rounds > 0:
-                            self.average_time_per_round = self.total_time / valid_rounds
+                    
                     if delivery_times:
                         max_delivery_time_this_round = max(delivery_times)
+                        # 在CMTP模式下，将树构建时间加到送达时间上
+                        if USE_CTMP_ROUTING_MODEL:
+                            max_delivery_time_this_round += tree_build_time
+                        
                         self.total_delivery_time += max_delivery_time_this_round
+                        
+                        # ## **** AoI MODIFICATION START: 更新AoI统计 **** ##
+                        # 使用MAC层计算的average_aoi而不是total_aoi
+                        if hasattr(self.sim_manager.mac_layer, 'average_aoi'):
+                            self.total_aoi += self.sim_manager.mac_layer.average_aoi
+                        # ## **** AoI MODIFICATION END **** ##
+                        
+                        valid_rounds += 1
                         self.average_delivery_time = self.total_delivery_time / valid_rounds if valid_rounds > 0 else 0.0
+                        # ## **** AoI MODIFICATION START: 计算平均AoI **** ##
+                        self.average_aoi = self.total_aoi / valid_rounds if valid_rounds > 0 else 0.0
+                        # ## **** AoI MODIFICATION END **** ##
                     else:
                         self.current_status_message += "（本轮无有效包，未计入统计）"
                 else:
@@ -178,12 +200,20 @@ class ExperimentManager:
             print("="*80)
             if USE_CTMP_ROUTING_MODEL:
                 print(f"[CMTP] 本轮建树时间: {tree_build_time:.4f} 秒")
+            # ## **** AoI MODIFICATION START: 显示AoI统计结果 **** ##
+            print(f"总AoI: {self.total_aoi:.2f}")
+            print(f"平均AoI: {self.average_aoi:.2f}")
+            # ## **** AoI MODIFICATION END **** ##
             for pkt in self.sim_manager.packets_in_network:
                 print(f"\n数据包 {pkt.id} ({pkt.source_id} -> {pkt.destination_id}):")
                 print(f"  状态: {pkt.status}")
                 print(f"  实际路径: {pkt.actual_hops}")
                 if hasattr(pkt, 'delivery_time') and pkt.delivery_time is not None:
                     print(f"  送达时间: {pkt.delivery_time:.2f}秒")
+                # ## **** AoI MODIFICATION START: 显示单个包的AoI **** ##
+                if hasattr(pkt, 'aoi') and pkt.aoi is not None:
+                    print(f"  AoI: {pkt.aoi:.2f}")
+                # ## **** AoI MODIFICATION END **** ##
                 print(f"  并发时延: {getattr(pkt, 'concurrent_delay', 0)} 时间片")
                 
                 if pkt.event_history:
@@ -220,10 +250,12 @@ class ExperimentManager:
                 "is_running": self.is_running,
                 "total_rounds_to_run": self.total_rounds_to_run,
                 "completed_rounds": self.completed_rounds,
-                "total_time": safe_float(self.total_time),
-                "average_time_per_round": safe_float(self.average_time_per_round),
                 "total_delivery_time": getattr(self, 'total_delivery_time', 0.0),
                 "average_delivery_time": getattr(self, 'average_delivery_time', 0.0),
+                # ## **** AoI MODIFICATION START: 添加AoI相关信息 **** ##
+                "total_aoi": getattr(self, 'total_aoi', 0.0),
+                "average_aoi": getattr(self, 'average_aoi', 0.0),
+                # ## **** AoI MODIFICATION END **** ##
                 "message": self.current_status_message,
                 "current_paths": self.current_round_paths, # 新增字段
                 "final_paths": [
@@ -232,7 +264,10 @@ class ExperimentManager:
                         "source": pkt.source_id,
                         "destination": pkt.destination_id,
                         "actual_hops": list(pkt.actual_hops),
-                        "delivery_time": safe_float(getattr(pkt, 'delivery_time', None))
+                        "delivery_time": safe_float(getattr(pkt, 'delivery_time', None)),
+                        # ## **** AoI MODIFICATION START: 添加AoI字段 **** ##
+                        "aoi": safe_float(getattr(pkt, 'aoi', None))
+                        # ## **** AoI MODIFICATION END **** ##
                     }
                     for pkt in self.sim_manager.packets_in_network
                 ] if not self.is_running else None,

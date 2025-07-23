@@ -33,21 +33,32 @@ PRR_GRID_MAP = [
     [0.80, 0.90, 0.85]
 ]
 
-# CMTP模型开关，True则使用CMTP路由，False则不用（论文MTP增强）
-USE_CTMP_ROUTING_MODEL = True
-
-# PTP模型开关，True则使用新模型计算路径权重，False则使用旧的地理距离
-USE_PTP_ROUTING_MODEL = False
+# PTP协议PRR自定义配置
+PTP_GRID_ROWS = 10  # PTP协议使用的网格行数
+PTP_GRID_COLS = 10  # PTP协议使用的网格列数
+PTP_PRR_MIN = 0.5  # PTP协议PRR最小值
+PTP_PRR_MAX = 0.9  # PTP协议PRR最大值
+PTP_USE_RANDOM_PRR = True  # 是否使用随机PRR，True则使用随机值，False则使用PRR_GRID_MAP
 
 # PRR丢包判定开关，True则启用PRR丢包/重传，False则只用EoD，不再PRR丢包
 USE_PRR_FAILURE_MODEL = True
+
+# 路由模型选择: "DHYTP", "CMTP", "PTP", "NONE"
+ROUTING_MODEL = "PTP"
+
+# 兼容性变量 - 基于ROUTING_MODEL自动设置
+USE_DHYTP_ROUTING_MODEL = ROUTING_MODEL == "DHYTP"
+USE_CTMP_ROUTING_MODEL = ROUTING_MODEL == "CMTP"
+USE_PTP_ROUTING_MODEL = ROUTING_MODEL == "PTP"
+
+
 
 # 并发区域检测阈值 
 CONCURRENCY_DISTANCE_THRESHOLD = 20.0  # (d_max) 判断并发的最大距离 (米)
 CONCURRENCY_ANGLE_THRESHOLD = 25.0   # (theta_max) 判断并发的最大夹角 (度)
 
 # EoD模型所需参数
-AVG_ONE_HOP_DISTANCE = 90.0 # (l_h^ave) 平均单跳通信距离，可以略小于通信范围
+AVG_ONE_HOP_DISTANCE = 80.0 # (l_h^ave) 平均单跳通信距离，可以略小于通信范围
 GRID_TRANSMISSION_ERROR = {   # (delta^t(z)) 每个网格的累积传输时间误差(秒)
     (0, 0): 0.01, (0, 1): 0.02, (0, 2): 0.01,
     (1, 0): 0.03, (1, 1): 0.05, (1, 2): 0.03,
