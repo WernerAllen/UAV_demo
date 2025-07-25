@@ -107,6 +107,19 @@ class SimulationManager:
         source_uav = self.mac_layer.uav_map.get(source_id)
         if not source_uav: return [], f"Source UAV {source_id} not found."
 
+        # 如果使用DHyTP路由，确保在创建数据包前初始化路由状态
+        if USE_DHYTP_ROUTING_MODEL and isinstance(self.routing_model, DHyTPRoutingModel):
+            # print(f"◆ 初始化DHyTP路由状态: 目标节点={destination_id}")
+            # 强制设置目标节点和开始构建树
+            self.routing_model.destination_list = [destination_id]
+            self.routing_model.tree_construction_started = True
+            self.routing_model.tree_build_start_time = self.simulation_time
+            self.routing_model.tree_build_progress = 0.0
+            # 生成随机树构建时间
+            self.routing_model.min_tree_build_time = self.routing_model._generate_random_build_time()
+            # 开始构建树
+            self.routing_model._build_enhanced_virtual_trees()
+
         created_packets = []
         for _ in range(packet_count):
             packet = Packet(source_id, destination_id, self.simulation_time)
@@ -128,6 +141,13 @@ class SimulationManager:
                 if hasattr(packet, 'add_event'):
                     packet.add_event("dhytp_init", source_id, 0, self.simulation_time, 
                                     f"DHyTP初始化, tree_progress={self.routing_model.tree_build_progress:.2f}")
+            
+            # 如果使用CMTP路由，也记录初始路由状态
+            elif USE_CTMP_ROUTING_MODEL and isinstance(self.routing_model, CMTPRoutingModel):
+                self.routing_model.update_protocol_status([destination_id], self.simulation_time)
+                if hasattr(packet, 'add_event'):
+                    packet.add_event("cmtp_init", source_id, 0, self.simulation_time, 
+                                    f"CMTP初始化, tree_progress={self.routing_model.tree_build_progress:.2f}")
             
             self.packets_in_network.append(packet)
             source_uav.add_packet_to_queue(packet)
@@ -275,7 +295,7 @@ class SimulationManager:
                     row = []
                     for c in range(grid_cols):
                         # 在最小值和最大值之间生成随机PRR
-                        prr = PTP_PRR_MIN + random.random() * (PTP_PRR_MAX - PTP_PRR_MIN)
+                        prr = PRR_MIN + random.random() * (PRR_MAX - PRR_MIN)
                         row.append(round(prr, 2))
                     prr_grid.append(row)
                 prr_map = prr_grid
@@ -293,6 +313,17 @@ class SimulationManager:
             }
 
         return state
+
+    # 添加能耗统计方法
+    def get_energy_statistics(self):
+        """获取能耗统计信息"""
+        if hasattr(self, 'mac_layer'):
+            return self.mac_layer.collect_energy_statistics()
+        return {
+            "total_energy": 0,
+            "avg_energy_per_packet": 0,
+            "delivered_packets": 0
+        }
 
     # ## **** MODIFICATION START: 添加打印数据包事件历史的方法 **** ##
     def print_packet_event_history(self):

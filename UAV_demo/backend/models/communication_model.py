@@ -23,8 +23,8 @@ class CommunicationModel:
             
             # 如果启用了随机PRR，则动态计算PRR值
             if getattr(simulation_config, 'PTP_USE_RANDOM_PRR', False):
-                prr_min = getattr(simulation_config, 'PTP_PRR_MIN', 0.5)
-                prr_max = getattr(simulation_config, 'PTP_PRR_MAX', 0.9)
+                prr_min = getattr(simulation_config, 'PRR_MIN', 0.5)
+                prr_max = getattr(simulation_config, 'PRR_MAX', 0.9)
                 
                 # 计算网格位置
                 cell_width = MAX_X / cols

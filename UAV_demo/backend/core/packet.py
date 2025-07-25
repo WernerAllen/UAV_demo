@@ -36,6 +36,12 @@ class Packet:
         # ## **** AoI MODIFICATION START: 添加AoI相关属性 **** ##
         self.aoi = None  # 数据包的AoI值（送达时计算）
         # ## **** AoI MODIFICATION END **** ##
+        # ## **** ENERGY MODIFICATION START: 添加能耗相关属性 **** ##
+        self.energy_consumed = 0.0  # 数据包传输过程中消耗的总能量
+        self.transmission_energy = 0.0  # 仅传输消耗的能量
+        self.protocol_energy = 0.0  # 协议操作消耗的能量
+        self.retransmission_energy = 0.0  # 重传消耗的能量
+        # ## **** ENERGY MODIFICATION END **** ##
 
     def get_next_hop_id(self):
         if self.path and 0 <= self.current_hop_index < len(self.path) - 1:
@@ -116,3 +122,20 @@ class Packet:
             "sim_time": sim_time,
             "info": info
         })
+
+    # ## **** ENERGY MODIFICATION START: 添加能耗记录方法 **** ##
+    def add_transmission_energy(self, energy):
+        """添加传输能耗（基础发送和接收能耗）"""
+        self.transmission_energy += energy
+        self.energy_consumed += energy
+
+    def add_protocol_energy(self, energy, operation_type=None):
+        """添加协议操作能耗（如路由计算、树维护等）"""
+        self.protocol_energy += energy
+        self.energy_consumed += energy
+
+    def add_retransmission_energy(self, energy):
+        """添加重传能耗（带有惩罚系数的）"""
+        self.retransmission_energy += energy
+        self.energy_consumed += energy
+    # ## **** ENERGY MODIFICATION END **** ##

@@ -8,6 +8,7 @@ import math
 import random  # 添加random模块导入，用于PRR计算
 import numpy as np  # 添加numpy模块导入，用于向量计算
 from simulation_config import UAV_COMMUNICATION_RANGE
+from functools import lru_cache  # 添加lru_cache用于缓存计算结果
 
 class DHyTPRoutingModel:
     """
@@ -34,8 +35,13 @@ class DHyTPRoutingModel:
         self.destination_list = []  # 目标节点列表
         self.tree_build_progress = 0.0  # 树构建进度(0-1)
         self.tree_build_threshold = 0.6  # 树构建完成阈值，适中的阈值确保合理切换
-        self.tree_build_start_time = None  # 记录开始构建树的时间
-        self.min_tree_build_time = 0.3  # 最短树构建时间(秒)，确保有PTP传输阶段但不过长
+        self.tree_build_start_time = None  # 记录开始构建树的时间，确保初始化为None
+        self.tree_ready = False  # 树是否已经构建完成
+        
+        # 随机时间区间配置
+        self.min_tree_build_time_range = (0.2, 0.5)  # 树构建时间范围(最小值, 最大值)
+        self.min_tree_build_time = self._generate_random_build_time()  # 当前实验的随机树构建时间
+        
         self.virtual_nodes_history = []  # 记录虚拟树节点数量历史，用于计算增长率
         self.last_update_time = None  # 上次更新时间
 
@@ -51,6 +57,32 @@ class DHyTPRoutingModel:
         self.ETX_UPDATE_THRESHOLD = 0.3  # ETX变化阈值，超过才更新树
         self.MERGE_DISTANCE_THRESHOLD = 30  # 目标节点合并树的距离阈值
         self.CONGESTION_UPDATE_INTERVAL = 0.5  # 拥塞信息更新间隔(秒)
+        
+        # ## **** ENERGY MODIFICATION START: 添加能耗累积计数器 **** ##
+        self.accumulated_tree_creation_energy = 0.0  # 累积的树创建能耗
+        self.accumulated_tree_maintenance_energy = 0.0  # 累积的树维护能耗
+        self.accumulated_phase_transition_energy = 0.0  # 累积的阶段转换能耗
+        self.tree_created = False  # 标记树是否已创建，避免重复计算树创建能耗
+        self.phase_transitioned = False  # 标记是否已进行阶段转换，避免重复计算
+        # ## **** ENERGY MODIFICATION END **** ##
+
+    def _generate_random_build_time(self):
+        """生成随机树构建时间"""
+        import random
+        min_time, max_time = self.min_tree_build_time_range
+        random_time = random.uniform(min_time, max_time)
+        
+        # 完全禁用输出
+        # 只在首次生成时输出，避免重复输出
+        # 添加时间戳检查，确保短时间内不重复输出
+        # current_time = time.time()
+        # if (not hasattr(self, '_last_build_time_print') or 
+        #     current_time - self._last_build_time_print > 2.0):  # 2秒内不重复输出
+        #     print(f"◆ DHyTP本次树构建时间设定为: {random_time:.2f}秒")
+        #     self._last_build_time_print = current_time
+        #     self._has_printed_build_time = True
+            
+        return random_time
 
     def reset_protocol_state(self):
         """重置DHyTP协议状态，用于新的实验轮次"""
@@ -59,6 +91,7 @@ class DHyTPRoutingModel:
         self.destination_list = []
         self.tree_build_progress = 0.0
         self.tree_build_start_time = None
+        self.tree_ready = False
         self.virtual_nodes_history = []
         self.last_update_time = None
         self.virtual_trees = {}
@@ -67,6 +100,29 @@ class DHyTPRoutingModel:
         self.congestion_links = {}
         self.last_etx_to_root = {}
         self.last_congestion_update = None
+        # 重置输出控制标志
+        self._has_printed_build_time = False
+        self._last_build_time_print = 0  # 重置时间戳
+        
+        # 清除所有计算缓存
+        if hasattr(self, '_neighbors_cache'):
+            self._neighbors_cache.clear()
+        if hasattr(self, '_prr_cache'):
+            self._prr_cache.clear()
+        if hasattr(self, '_link_delay_cache'):
+            self._link_delay_cache.clear()
+        if hasattr(self, '_etx_to_root_cache'):
+            self._etx_to_root_cache.clear()
+            
+        # ## **** ENERGY MODIFICATION START: 重置能耗累积计数器 **** ##
+        self.accumulated_tree_creation_energy = 0.0
+        self.accumulated_tree_maintenance_energy = 0.0
+        self.accumulated_phase_transition_energy = 0.0
+        self.tree_created = False
+        self.phase_transitioned = False
+        # ## **** ENERGY MODIFICATION END **** ##
+            
+        # 每次重置时不重新生成随机树构建时间，等到开始构建树时再生成
         print("◆ DHyTP协议状态已重置，准备新的实验轮次")
 
     def update_protocol_status(self, destination_ids=None, sim_time=None):
@@ -78,7 +134,8 @@ class DHyTPRoutingModel:
         4. 更新拥塞感知信息
         5. 判断是否可以切换到CMTP（树构建达到阈值时）
         """
-        current_time = time.time()
+        # 使用仿真时间而不是实际时间
+        current_time = sim_time if sim_time is not None else 0.0
 
         # 首次指定目标节点，开始构建树
         if destination_ids and not self.tree_construction_started:
@@ -87,77 +144,84 @@ class DHyTPRoutingModel:
             self.tree_build_progress = 0.0
             self.tree_build_start_time = current_time
             self.last_update_time = current_time
-            self.last_congestion_update = current_time
+            # 重新生成随机树构建时间
+            self.min_tree_build_time = self._generate_random_build_time()
 
-            # 开始构建增强的虚拟树结构
+            # 开始构建虚拟树结构
             self._build_enhanced_virtual_trees()
-            print(f"◆ 开始构建增强树：目标节点 {self.destination_list}")
+            
+            # 限制输出
+            # print(f"◆◆◆ DHyTP开始构建树：目标节点 {self.destination_list}, 预计时间 {self.min_tree_build_time:.2f}秒 ◆◆◆")
             return
 
-        # 如果已经决定使用CMTP，继续维护树结构和拥塞信息
-        if self.use_cmtp:
+        # 如果树已经构建完成并且已经切换到CMTP，继续维护树结构和拥塞信息
+        if self.tree_ready and self.use_cmtp:
             # 定期更新拥塞信息和树自愈
-            if (self.last_congestion_update is None or
-                current_time - self.last_congestion_update >= self.CONGESTION_UPDATE_INTERVAL):
-                self._update_congestion_info()
+            self._update_congestion_info()
+            try:
+                # 包装在try-except中防止递归错误影响系统稳定性
                 self._self_heal_virtual_trees()
-                self.last_congestion_update = current_time
-            return
+            except RecursionError as e:
+                print(f"◆ 警告：树自愈过程中遇到递归错误：{str(e)}. 跳过本次自愈操作.")
+            except Exception as e:
+                print(f"◆ 警告：树自愈过程中遇到错误：{str(e)}. 跳过本次自愈操作.")
+            return  # 只有在树已经构建完成并切换到CMTP时才返回
 
-        # 尝试构建CMTP树
+        # 尝试构建DHyTP树并进行PTP->CMTP的转换判断
         if self.tree_construction_started and self.destination_list:
-            # 计算时间经过
-            elapsed_time = current_time - (self.tree_build_start_time or current_time)
+            # 计算时间经过（使用仿真时间）
+            if self.tree_build_start_time is None:
+                self.tree_build_start_time = current_time
+                
+            elapsed_time = current_time - self.tree_build_start_time
 
-            # 限制更新频率，每0.1秒最多更新一次
+            # 限制更新频率，每0.1秒最多更新一次（使用仿真时间）
             if self.last_update_time and current_time - self.last_update_time < 0.1:
-                return
+                return  # 距离上次更新时间太短，跳过本次更新
 
             self.last_update_time = current_time
 
-            # 构建增强的虚拟树结构
-            self._build_enhanced_virtual_trees()
-
-            # 更新拥塞信息
-            if (self.last_congestion_update is None or
-                current_time - self.last_congestion_update >= self.CONGESTION_UPDATE_INTERVAL):
-                self._update_congestion_info()
-                self.last_congestion_update = current_time
-
-            # 评估树构建进度 - DHyTP渐进式构建
-            if self.virtual_trees:
-                # 记录虚拟树节点数量历史（仅用于统计）
-                covered_nodes = set()
-                for _, tree in self.virtual_trees.items():
-                    covered_nodes.update(tree.keys())
-
-                self.virtual_nodes_history.append(len(covered_nodes))
-                if len(self.virtual_nodes_history) > 10:
-                    self.virtual_nodes_history = self.virtual_nodes_history[-10:]
-
-                # 记录上一次进度
-                old_progress = self.tree_build_progress
-
-                # DHyTP简化进度计算：完全基于时间因子
-                time_factor = min(1.0, elapsed_time / self.min_tree_build_time)
+            # 计算树构建进度（0-1之间）
+            # 使用时间比例，但限制在0-1之间
+            time_ratio = min(1.0, elapsed_time / self.min_tree_build_time)
+            
+            # 使用更平滑的进度函数，初期稍微快一些，后期减慢
+            progress = time_ratio ** 0.8  # 指数小于1，使得初期进度快一些
+            self.tree_build_progress = progress
+            
+            # 缓存当前树节点数量
+            self.virtual_nodes_history.append(self._count_virtual_tree_nodes())
+            
+            # 每经过0.5秒输出一次进度
+            if int(elapsed_time * 2) > int((elapsed_time - 0.1) * 2):
+                # print(f"◆ DHyTP树构建进度: {progress:.2f}, 已用时间: {elapsed_time:.1f}秒")
+                pass
                 
-                # 进度直接等于时间因子
-                self.tree_build_progress = time_factor
+            # 判断是否可以切换到CMTP（根据进度阈值）
+            can_switch = progress >= 1.0 or elapsed_time >= self.min_tree_build_time
+            
+            # 树已构建完成但尚未标记为tree_ready时，立即标记
+            if can_switch and not self.tree_ready:
+                # 标记树已构建完成
+                self.tree_ready = True
 
-                # 简化切换条件：只基于时间因子
-                can_switch = elapsed_time >= self.min_tree_build_time
-
-                if can_switch:
-                    print(f"\n◆◆◆ DHyTP树构建完成：时间={elapsed_time:.1f}s, 进度={self.tree_build_progress:.2f} ◆◆◆")
+                # 树已构建完成但尚未标记为use_cmtp时，立即标记
+                if can_switch and not self.use_cmtp:
+                    print(f"\n◆◆◆ DHyTP树构建完成：时间={elapsed_time:.1f}s/{self.min_tree_build_time:.2f}s, 进度={self.tree_build_progress:.2f} ◆◆◆")
                     print(f"◆◆◆ 切换到CMTP模式 ◆◆◆\n")
+                
+                # ## **** ENERGY MODIFICATION START: 记录阶段转换能耗 **** ##
+                from simulation_config import PROTOCOL_ENERGY_CONFIG, COLLECT_ENERGY_STATS
+                if COLLECT_ENERGY_STATS and not self.phase_transitioned:
+                    phase_transition_energy = PROTOCOL_ENERGY_CONFIG["DHYTP"]["PHASE_TRANSITION"]
+                    self.accumulated_phase_transition_energy += phase_transition_energy
+                    self.phase_transitioned = True
+                    print(f"⚡ DHYTP: 累计阶段转换能耗 +{phase_transition_energy:.2f}J")
+                # ## **** ENERGY MODIFICATION END **** ##
+                
                     self.use_cmtp = True
                     # 最终更新拥塞信息
                     self._update_congestion_info()
-                else:
-                    # 进度有显著变化时才输出日志
-                    progress_change = self.tree_build_progress - old_progress
-                    if progress_change >= 0.1:
-                        print(f"◆ DHyTP构建进度: {self.tree_build_progress:.2f} (时间:{time_factor:.2f})")
 
     def _build_enhanced_virtual_trees(self):
         """
@@ -165,6 +229,15 @@ class DHyTPRoutingModel:
         """
         if not self.destination_list:
             return
+
+        # ## **** ENERGY MODIFICATION START: 记录树创建能耗 **** ##
+        from simulation_config import PROTOCOL_ENERGY_CONFIG, COLLECT_ENERGY_STATS
+        if COLLECT_ENERGY_STATS and not self.tree_created:
+            tree_creation_energy = PROTOCOL_ENERGY_CONFIG["DHYTP"]["TREE_CREATION"]
+            self.accumulated_tree_creation_energy += tree_creation_energy
+            self.tree_created = True
+            print(f"⚡ DHYTP: 累计树创建能耗 +{tree_creation_energy:.2f}J")
+        # ## **** ENERGY MODIFICATION END **** ##
 
         self.root_nodes = []
         self.virtual_trees = {}
@@ -215,7 +288,15 @@ class DHyTPRoutingModel:
 
     def _calculate_distance(self, uav1, uav2):
         """统一的距离计算方法，避免代码重复"""
-        return math.sqrt((uav1.x - uav2.x) ** 2 + (uav1.y - uav2.y) ** 2 + (uav1.z - uav2.z) ** 2)
+        return self._calculate_distance_cached(
+            (uav1.x, uav1.y, uav1.z),
+            (uav2.x, uav2.y, uav2.z)
+        )
+        
+    @lru_cache(maxsize=1024)
+    def _calculate_distance_cached(self, pos1, pos2):
+        """缓存版本的距离计算，使用坐标元组作为参数"""
+        return math.sqrt((pos1[0] - pos2[0]) ** 2 + (pos1[1] - pos2[1]) ** 2 + (pos1[2] - pos2[2]) ** 2)
 
     def _add_packet_event(self, packet, event_type, uav_id, info, sim_time=None):
         """统一的事件记录方法，避免代码重复"""
@@ -278,7 +359,15 @@ class DHyTPRoutingModel:
         return merged
 
     def _get_neighbors(self, uav):
-        """获取uav的邻居节点（通信范围内）"""
+        """获取uav的邻居节点（通信范围内），使用缓存提高性能"""
+        # 创建临时缓存键
+        cache_key = (id(uav), uav.x, uav.y, uav.z)
+        
+        # 检查是否有缓存
+        if hasattr(self, '_neighbors_cache') and cache_key in self._neighbors_cache:
+            return self._neighbors_cache[cache_key]
+        
+        # 如果没有缓存，则计算邻居
         neighbors = []
         for other in self.uav_map.values():
             if other.id == uav.id:
@@ -286,6 +375,15 @@ class DHyTPRoutingModel:
             dist = self._calculate_distance(uav, other)
             if dist <= UAV_COMMUNICATION_RANGE:
                 neighbors.append(other)
+        
+        # 初始化缓存（如果需要）并存储结果
+        if not hasattr(self, '_neighbors_cache'):
+            self._neighbors_cache = {}
+        # 限制缓存大小
+        if len(self._neighbors_cache) > 1000:
+            self._neighbors_cache.clear()  # 防止内存泄漏，定期清空
+        self._neighbors_cache[cache_key] = neighbors
+        
         return neighbors
 
     def _get_link_base_delay(self, uav1, uav2):
@@ -296,18 +394,41 @@ class DHyTPRoutingModel:
         return 1.0 / prr
 
     def _get_prr(self, uav1, uav2):
-        """获取uav1到uav2的PRR，基于距离分段随机"""
+        """获取uav1到uav2的PRR，基于距离分段随机，使用缓存提高性能"""
+        # 创建缓存键：只考虑距离，因为PRR只与距离相关，而不是具体的坐标
         dist = self._calculate_distance(uav1, uav2)
+        
+        # 使用距离区间作为键
+        if not hasattr(self, '_prr_cache'):
+            self._prr_cache = {}
+            
+        # 为了避免随机值在每次调用时都不同，我们对距离进行离散化处理
+        dist_key = int(dist * 10)  # 0.1的精度
+        
+        if dist_key in self._prr_cache:
+            return self._prr_cache[dist_key]
+        
+        # 计算PRR
+        prr = 0
         if dist <= 10:
-            return random.uniform(0.85, 0.9)
+            prr = random.uniform(0.85, 0.9)
         elif dist <= 30:
-            return random.uniform(0.75, 0.85)
+            prr = random.uniform(0.75, 0.85)
         elif dist <= 60:
-            return random.uniform(0.65, 0.75)
+            prr = random.uniform(0.65, 0.75)
         elif dist <= 100:
-            return random.uniform(0.5, 0.65)
+            prr = random.uniform(0.5, 0.65)
         else:
-            return 0
+            prr = 0  # 超出范围返回0
+        
+        # 限制缓存大小
+        if len(self._prr_cache) > 1000:
+            self._prr_cache.clear()
+        
+        # 存储结果
+        self._prr_cache[dist_key] = prr
+        
+        return prr
 
     def _filter_candidates_by_mobility(self, current_uav, candidates, prediction_time=0.4):
         """
@@ -420,15 +541,45 @@ class DHyTPRoutingModel:
         Returns:
             下一跳节点和相关度量值的元组
         """
+        # 确保目标节点被添加到destination_list中
+        if destination_id and not self.destination_list:
+            self.destination_list = [destination_id]
+            print(f"◆ DHyTP添加目标节点: {destination_id}")
+            
+        # 如果树构建尚未开始但有目标节点，则强制开始树构建
+        if destination_id and not self.tree_construction_started:
+            print(f"◆ DHyTP强制开始树构建: 目标节点={destination_id}")
+            self.tree_construction_started = True
+            self.tree_build_progress = 0.0
+            self.tree_build_start_time = sim_time
+            self.last_update_time = sim_time
+            self.last_congestion_update = sim_time
+            # 生成随机树构建时间
+            self.min_tree_build_time = self._generate_random_build_time()
+            # 开始构建树
+            self._build_enhanced_virtual_trees()
+        
         # 更新协议状态
         self.update_protocol_status([destination_id] if destination_id else None, sim_time)
+        
+        # 检查是否应该切换到CMTP模式（确保树构建完成及时切换）
+        if self.tree_construction_started and not self.use_cmtp and sim_time and self.tree_build_start_time:
+            elapsed_time = sim_time - self.tree_build_start_time
+            # 减少重复输出
+            # print(f"◆ DHyTP检查切换条件: 经过时间={elapsed_time:.2f}秒, 阈值={self.min_tree_build_time:.2f}秒")
+            if elapsed_time >= self.min_tree_build_time:
+                print(f"\n◆◆◆ DHyTP树构建完成 (select_next_hop 中检测): 时间={elapsed_time:.1f}s/{self.min_tree_build_time:.2f}s ◆◆◆")
+                print(f"◆◆◆ 切换到CMTP模式 ◆◆◆\n")
+                self.use_cmtp = True
+                self._update_congestion_info()
 
         # 添加当前UAV和目标信息
         current_id = getattr(current_uav, 'id', 'unknown')
 
         # 输出树构建进度（避免重复输出）
-        if self.tree_construction_started and self.tree_build_progress > 0 and not self.use_cmtp:
-            print(f"◆ 树构建进度: {self.tree_build_progress:.2f}")
+        # 减少重复输出，仅在特定条件下打印
+        # if self.tree_construction_started and self.tree_build_progress > 0 and not self.use_cmtp:
+        #     print(f"◆ 树构建进度: {self.tree_build_progress:.2f}")
 
         if self.use_cmtp:
             # 已构建完树，使用增强的CMTP模式
@@ -554,12 +705,27 @@ class DHyTPRoutingModel:
                     self.congestion_links[link] = []
                 self.congestion_links[link].append(root_id)
 
+        # ## **** ENERGY MODIFICATION START: 记录拥塞更新能耗 **** ##
+        if self.use_cmtp:  # 只在CMTP阶段记录拥塞更新能耗
+            # 拥塞更新能耗现在作为树维护能耗的一部分，不再单独计算
+            pass
+        # ## **** ENERGY MODIFICATION END **** ##
+
     def _self_heal_virtual_trees(self):
         """
         树自愈机制：只有ETX显著变化才更新树
         """
         if not self.virtual_trees or not self.root_nodes:
             return
+
+        # ## **** ENERGY MODIFICATION START: 记录树维护能耗 **** ##
+        from simulation_config import PROTOCOL_ENERGY_CONFIG, COLLECT_ENERGY_STATS
+        if COLLECT_ENERGY_STATS:
+            tree_maintenance_energy = PROTOCOL_ENERGY_CONFIG["DHYTP"]["TREE_MAINTENANCE"]
+            # 将树维护能耗添加到累积计数中，而不是每个数据包上
+            self.accumulated_tree_maintenance_energy = getattr(self, 'accumulated_tree_maintenance_energy', 0.0) + tree_maintenance_energy
+            print(f"⚡ DHYTP: 累计树维护能耗 +{tree_maintenance_energy:.2f}J")
+        # ## **** ENERGY MODIFICATION END **** ##
 
         for root_id in self.root_nodes:
             if root_id not in self.virtual_trees:
@@ -613,29 +779,56 @@ class DHyTPRoutingModel:
         return best_parent, min_etx
 
     def _get_etx_to_root(self, node, root_id):
-        """递归计算节点到根的ETX"""
+        """递归计算节点到根的ETX，使用缓存避免重复计算"""
+        # 使用节点ID和根ID作为缓存键
+        cache_key = (node.id, root_id)
+        
+        # 初始化缓存（如果需要）
+        if not hasattr(self, '_etx_to_root_cache'):
+            self._etx_to_root_cache = {}
+        
+        # 检查缓存
+        if cache_key in self._etx_to_root_cache:
+            return self._etx_to_root_cache[cache_key]
+            
+        # 直接计算情况
         if node.id == root_id:
+            self._etx_to_root_cache[cache_key] = 0.0
             return 0.0
 
         if root_id not in self.virtual_trees:
+            self._etx_to_root_cache[cache_key] = float('inf')
             return float('inf')
 
         tree = self.virtual_trees[root_id]
         if node.id not in tree:
+            self._etx_to_root_cache[cache_key] = float('inf')
             return float('inf')
 
         parent_id = tree[node.id]
         if parent_id is None:
-            return 0.0 if node.id == root_id else float('inf')
+            result = 0.0 if node.id == root_id else float('inf')
+            self._etx_to_root_cache[cache_key] = result
+            return result
 
         parent = self.uav_map.get(parent_id)
         if parent is None:
+            self._etx_to_root_cache[cache_key] = float('inf')
             return float('inf')
 
+        # 递归计算
         etx_to_parent = self._get_link_base_delay(node, parent)
         etx_parent_to_root = self._get_etx_to_root(parent, root_id)
-
-        return etx_to_parent + etx_parent_to_root
+        
+        # 计算结果并缓存
+        result = etx_to_parent + etx_parent_to_root
+        
+        # 限制缓存大小
+        if len(self._etx_to_root_cache) > 2000:  # 允许更大的缓存，因为这个函数递归调用多
+            self._etx_to_root_cache.clear()
+            
+        self._etx_to_root_cache[cache_key] = result
+        return result
 
     def get_protocol_state_info(self):
         """
@@ -757,3 +950,15 @@ class DHyTPRoutingModel:
                         )
         
         return sending_vectors
+
+    def _count_virtual_tree_nodes(self):
+        """计算所有虚拟树的节点数量"""
+        if not self.virtual_trees:
+            return 0
+            
+        # 收集所有节点ID
+        all_nodes = set()
+        for _, tree in self.virtual_trees.items():
+            all_nodes.update(tree.keys())
+            
+        return len(all_nodes)

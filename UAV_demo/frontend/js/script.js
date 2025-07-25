@@ -592,6 +592,10 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('expTotalAoI').textContent = (statusData.total_aoi || 0).toFixed(2);
             document.getElementById('expAvgAoI').textContent = (statusData.average_aoi || 0).toFixed(2);
             // ## **** AoI MODIFICATION END **** ##
+            // ## **** ENERGY MODIFICATION START: 更新能耗统计显示 **** ##
+            document.getElementById('expTotalEnergy').textContent = (statusData.total_energy || 0).toFixed(2);
+            document.getElementById('expAvgEnergy').textContent = (statusData.average_energy || 0).toFixed(2);
+            // ## **** ENERGY MODIFICATION END **** ##
         }
         
         if (statusData.completed_rounds > previousExperimentStatus.completed_rounds) {

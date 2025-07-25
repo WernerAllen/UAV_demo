@@ -217,6 +217,17 @@ def get_packet_events_endpoint():
         })
 # ## **** MODIFICATION END **** ##
 
+# ## **** ENERGY MODIFICATION START: 添加能耗统计API端点 **** ##
+@app.route('/api/simulation/energy-stats', methods=['GET'])
+def get_energy_stats_endpoint():
+    with exp_manager.simulation_lock:
+        energy_stats = sim_manager.get_energy_statistics()
+    return jsonify({
+        "energy_statistics": energy_stats,
+        "current_protocol": simulation_config.ROUTING_MODEL
+    })
+# ## **** ENERGY MODIFICATION END **** ##
+
 
 if __name__ == '__main__':
     print("Starting Flask server for UAV Simulation...")

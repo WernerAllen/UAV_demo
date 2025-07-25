@@ -36,15 +36,15 @@ PRR_GRID_MAP = [
 # PTP协议PRR自定义配置
 PTP_GRID_ROWS = 10  # PTP协议使用的网格行数
 PTP_GRID_COLS = 10  # PTP协议使用的网格列数
-PTP_PRR_MIN = 0.5  # PTP协议PRR最小值
-PTP_PRR_MAX = 0.9  # PTP协议PRR最大值
+PRR_MIN = 0.8  # PRR最小值（全局通用）
+PRR_MAX = 1.0  # PRR最大值（全局通用）
 PTP_USE_RANDOM_PRR = True  # 是否使用随机PRR，True则使用随机值，False则使用PRR_GRID_MAP
 
 # PRR丢包判定开关，True则启用PRR丢包/重传，False则只用EoD，不再PRR丢包
 USE_PRR_FAILURE_MODEL = True
 
 # 路由模型选择: "DHYTP", "CMTP", "PTP", "NONE"
-ROUTING_MODEL = "PTP"
+ROUTING_MODEL = "DHYTP"
 
 # 兼容性变量 - 基于ROUTING_MODEL自动设置
 USE_DHYTP_ROUTING_MODEL = ROUTING_MODEL == "DHYTP"
@@ -70,6 +70,45 @@ MAX_RETRANSMISSIONS = 10
 
 # 位置变动检测阈值 (米)
 POSITION_CHANGE_THRESHOLD = 1.5  # 检测下一跳节点位置变动的阈值
+
+
+COLLECT_ENERGY_STATS = True             # 是否收集能耗统计信息
+
+# 能源成本模型配置
+# 基础能耗参数
+ENERGY_UNIT_SEND = 0.5      # 每发送一个数据包的基础能耗
+ENERGY_UNIT_RECEIVE = 0.1   # 每接收一个数据包的基础能耗
+ENERGY_RETRANSMISSION_PENALTY = 1.5    # 重传能耗惩罚系数
+
+
+# 协议特定能耗配置
+PROTOCOL_ENERGY_CONFIG = {
+    "PTP": {
+        # PTP协议不需要额外的能耗计算
+    },
+    "CMTP": {
+        "TREE_CREATION": 1.5,          # 创建树结构的初始能耗/数据包
+        "TREE_MAINTENANCE": 0.05,        # 每次树维护操作的能耗/数据包
+    },
+    "DHYTP": {
+        "TREE_CREATION": 1.0,          # 创建树结构的初始能耗/数据包
+        "TREE_MAINTENANCE": 0.05,        # 每次树维护操作的能耗/数据包
+        "PHASE_TRANSITION": 0.01,        # 从PTP阶段过渡到CMTP阶段的能耗/数据包
+    }
+}
+
+
+# 能耗计算方法:
+# 1. 数据包传输能耗 = ENERGY_UNIT_SEND (固定值)
+# 2. 数据包接收能耗 = ENERGY_UNIT_RECEIVE (固定值)
+# 3. 重传能耗 = (传输能耗 * ENERGY_RETRANSMISSION_PENALTY)
+# 4. 协议操作能耗 = 对应协议操作的能耗值 (来自PROTOCOL_ENERGY_CONFIG)
+#
+# 总能耗计算方式:
+# - 每个数据包在Packet类中添加energy_consumed属性，记录传输过程中累积的能耗
+# - 在每次跳转、计算和协议操作时累加相应的能耗
+# - 仿真结束后计算: 总能耗 / 成功传输的数据包数 = 平均每包能耗
+
 
 
 

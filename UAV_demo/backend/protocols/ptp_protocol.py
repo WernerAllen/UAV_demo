@@ -12,39 +12,46 @@ class PTPRoutingModel:
     """
     def __init__(self, uav_map):
         self.uav_map = uav_map
-        # 初始化PTP专用PRR网格
-        self.ptp_prr_grid = None
+        # 初始化PRR网格（用于快速查询通信质量）
+        from simulation_config import PTP_GRID_ROWS, PTP_GRID_COLS, PTP_USE_RANDOM_PRR
+        # 直接导入全局PRR参数
+        from simulation_config import PRR_MIN, PRR_MAX
+        
+        # 初始化PTP的PRR网格
+        self.ptp_prr_grid = []
         if hasattr(globals(), 'PTP_USE_RANDOM_PRR') and PTP_USE_RANDOM_PRR:
             self._initialize_random_prr_grid()
+            
+        # 初始化PRR缓存
+        self._prr_cache = {}
 
     def _initialize_random_prr_grid(self):
         """初始化随机PRR网格"""
-        rows = getattr(globals(), 'PTP_GRID_ROWS', GRID_ROWS)
-        cols = getattr(globals(), 'PTP_GRID_COLS', GRID_COLS)
-        prr_min = getattr(globals(), 'PTP_PRR_MIN', 0.5)
-        prr_max = getattr(globals(), 'PTP_PRR_MAX', 0.9)
+        from simulation_config import PTP_GRID_ROWS, PTP_GRID_COLS, PRR_MIN, PRR_MAX
+        
+        rows = PTP_GRID_ROWS
+        cols = PTP_GRID_COLS
         
         self.ptp_prr_grid = []
         for _ in range(rows):
             row = []
             for _ in range(cols):
-                row.append(random.uniform(prr_min, prr_max))
+                row.append(random.uniform(PRR_MIN, PRR_MAX))
             self.ptp_prr_grid.append(row)
         
-        print(f"已初始化PTP随机PRR网格 ({rows}x{cols})，PRR范围: {prr_min}-{prr_max}")
+        print(f"已初始化PTP随机PRR网格 ({rows}x{cols})，PRR范围: {PRR_MIN}-{PRR_MAX}")
 
     def get_grid_cell(self, x, y):
         if not (0 <= x < MAX_X and 0 <= y < MAX_Y):
             return None, None
             
-        # 使用PTP专用网格尺寸（如果定义了）
-        rows = getattr(globals(), 'PTP_GRID_ROWS', GRID_ROWS)
-        cols = getattr(globals(), 'PTP_GRID_COLS', GRID_COLS)
+        # 使用PTP专用网格尺寸
+        from simulation_config import PTP_GRID_ROWS, PTP_GRID_COLS
         
-        cell_width = MAX_X / cols
-        cell_height = MAX_Y / rows
-        col = min(int(x / cell_width), cols - 1)
-        row = min(int(y / cell_height), rows - 1)
+        cell_width = MAX_X / PTP_GRID_COLS
+        cell_height = MAX_Y / PTP_GRID_ROWS
+        col = min(int(x / cell_width), PTP_GRID_COLS - 1)
+        row = min(int(y / cell_height), PTP_GRID_ROWS - 1)
         return row, col
 
     def calculate_eod_for_grid(self, distance_in_grid, grid_row, grid_col):
@@ -188,14 +195,101 @@ class PTPRoutingModel:
                 if concurrent:
                     continue
             candidate_neighbors.append(neighbor)
+        
         # 计算utility
         max_utility = -float('inf')
         best_neighbor = None
         eod_current = self.get_link_base_delay(current_uav, dest_uav)
+        
+        # 导入PRR配置信息
+        from simulation_config import PRR_MIN, PRR_MAX
+        
+        # 计算PRR权重系数，在低PRR环境下增大权重
+        avg_prr = (PRR_MIN + PRR_MAX) / 2
+        # 根据环境PRR动态调整权重，PRR越低权重越大
+        if avg_prr < 0.3:
+            prr_weight = 0.5  # 低PRR环境下较高权重
+        else:
+            prr_weight = 0.3  # 正常PRR环境下较低权重
+            
         for neighbor in candidate_neighbors:
             eod_neighbor = self.get_link_base_delay(neighbor, dest_uav)
-            utility = eod_current - eod_neighbor
+            
+            # 计算基本效用
+            base_utility = eod_current - eod_neighbor
+            
+            # 获取当前节点到邻居的PRR值
+            if hasattr(self, '_get_prr'):
+                prr = self._get_prr(current_uav, neighbor)
+            else:
+                # 如果没有_get_prr方法，使用基本PRR计算逻辑
+                row, col = self.get_grid_cell(neighbor.x, neighbor.y)
+                prr = self.calculate_eod_for_grid(1.0, row, col)
+                prr = min(max(prr, 0.05), 0.95)  # 确保PRR在合理范围内
+            
+            # 修改后的效用计算 - 增加PRR权重
+            utility = base_utility + prr_weight * prr
+            
             if utility > max_utility:
                 max_utility = utility
                 best_neighbor = neighbor
+                
         return best_neighbor, max_utility 
+
+    def _get_prr(self, uav1, uav2):
+        """
+        获取uav1到uav2的PRR值
+        使用网格化的方式和配置的PRR范围
+        添加缓存以提高性能
+        """
+        # 计算距离
+        dist = math.sqrt((uav1.x - uav2.x) ** 2 + (uav1.y - uav2.y) ** 2 + (uav1.z - uav2.z) ** 2)
+        
+        # 使用距离区间作为键
+        if not hasattr(self, '_prr_cache'):
+            self._prr_cache = {}
+            
+        # 为了避免随机值在每次调用时都不同，我们对距离进行离散化处理
+        dist_key = int(dist * 10)  # 0.1的精度
+        
+        if dist_key in self._prr_cache:
+            return self._prr_cache[dist_key]
+        
+        # 导入PRR配置
+        from simulation_config import PRR_MIN, PRR_MAX
+        
+        # 根据距离计算PRR
+        range_size = PRR_MAX - PRR_MIN  # 上下限差值
+        
+        if dist <= 10:
+            # 距离最近，使用最高PRR区间 (75%-100%范围)
+            prr_min = PRR_MIN + range_size * 0.75
+            prr_max = PRR_MAX
+            prr = random.uniform(prr_min, prr_max)
+        elif dist <= 30:
+            # 距离较近，使用较高PRR区间 (50%-75%范围)
+            prr_min = PRR_MIN + range_size * 0.5
+            prr_max = PRR_MIN + range_size * 0.75
+            prr = random.uniform(prr_min, prr_max)
+        elif dist <= 60:
+            # 距离中等，使用中等PRR区间 (25%-50%范围)
+            prr_min = PRR_MIN + range_size * 0.25
+            prr_max = PRR_MIN + range_size * 0.5
+            prr = random.uniform(prr_min, prr_max)
+        elif dist <= 100:
+            # 距离较远，使用较低PRR区间 (0%-25%范围)
+            prr_min = PRR_MIN
+            prr_max = PRR_MIN + range_size * 0.25
+            prr = random.uniform(prr_min, prr_max)
+        else:
+            # 超出范围返回0
+            prr = 0
+        
+        # 限制缓存大小
+        if len(self._prr_cache) > 1000:
+            self._prr_cache.clear()
+        
+        # 存储结果
+        self._prr_cache[dist_key] = prr
+        
+        return prr 

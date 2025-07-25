@@ -3,6 +3,9 @@
 
 import math
 import numpy as np
+import time  # 添加time模块导入，用于记录时间
+import random  # 添加random模块导入，用于PRR计算
+from functools import lru_cache  # 添加lru_cache用于缓存计算结果
 from simulation_config import *
 
 class CMTPRoutingModel:
@@ -20,6 +23,167 @@ class CMTPRoutingModel:
         self.root_nodes = None
         self.root_groups = None  # 论文MTP增强：合并树的分组
         self.last_etx_to_root = {}  # 论文MTP增强：记录上次ETX
+        
+        # 添加协议状态控制变量，类似DHyTP
+        self.tree_construction_started = False  # 是否已开始构建树
+        self.destination_list = []  # 目标节点列表
+        self.tree_build_progress = 0.0  # 树构建进度(0-1)
+        self.tree_build_start_time = None  # 记录开始构建树的时间
+        
+        # 随机时间区间配置
+        self.min_tree_build_time_range = (0.3, 0.5)  # 树构建时间范围(最小值, 最大值)
+        self.min_tree_build_time = self._generate_random_build_time()  # 当前实验的随机树构建时间
+        
+        self.virtual_nodes_history = []  # 记录虚拟树节点数量历史
+        self.last_update_time = None  # 上次更新时间
+        self.tree_ready = False  # 树是否已经构建完成
+
+        # ## **** ENERGY MODIFICATION START: 添加能耗累积计数器 **** ##
+        self.accumulated_tree_creation_energy = 0.0  # 累积的树创建能耗
+        self.accumulated_tree_maintenance_energy = 0.0  # 累积的树维护能耗
+        self.tree_created = False  # 标记树是否已创建，避免重复计算树创建能耗
+        # ## **** ENERGY MODIFICATION END **** ##
+
+    def _generate_random_build_time(self):
+        """生成随机树构建时间"""
+        import random
+        min_time, max_time = self.min_tree_build_time_range
+        random_time = random.uniform(min_time, max_time)
+        # 禁用输出
+        # print(f"◆ CMTP本次树构建时间设定为: {random_time:.2f}秒")
+        return random_time
+
+    def update_protocol_status(self, destination_ids=None, sim_time=None):
+        """
+        更新协议状态：
+        1. 记录目标节点列表
+        2. 动态评估树构建进度
+        3. 构建多层虚拟树结构
+        4. 更新拥塞感知信息
+        5. 判断是否树已构建完成
+        """
+        # 使用仿真时间而不是实际时间
+        current_time = sim_time if sim_time is not None else 0.0
+
+        # 首次指定目标节点，开始构建树
+        if destination_ids and not self.tree_construction_started:
+            self.destination_list = destination_ids if isinstance(destination_ids, list) else [destination_ids]
+            self.tree_construction_started = True
+            self.tree_build_progress = 0.0
+            self.tree_build_start_time = current_time
+            self.last_update_time = current_time
+            # 重新生成随机树构建时间
+            self.min_tree_build_time = self._generate_random_build_time()
+            
+            # 开始构建虚拟树结构
+            self.build_virtual_tree_structures(self.destination_list)
+            # 禁用输出
+            # print(f"◆ CMTP开始构建树：目标节点 {self.destination_list}, 预计时间 {self.min_tree_build_time:.2f}秒")
+            return
+
+        # 如果树已经构建完成，继续维护树结构和拥塞信息
+        if self.tree_ready:
+            # 定期更新拥塞信息和树自愈
+            self.update_congestion_info()
+            try:
+                # 包装在try-except中防止递归错误影响系统稳定性
+                self.self_heal_virtual_trees()
+            except RecursionError as e:
+                print(f"◆ 警告：树自愈过程中遇到递归错误：{str(e)}. 跳过本次自愈操作.")
+            except Exception as e:
+                print(f"◆ 警告：树自愈过程中遇到错误：{str(e)}. 跳过本次自愈操作.")
+            return
+
+        # 尝试构建CMTP树
+        if self.tree_construction_started and self.destination_list:
+            # 计算时间经过（使用仿真时间）
+            if self.tree_build_start_time is None:
+                self.tree_build_start_time = current_time
+                
+            elapsed_time = current_time - self.tree_build_start_time
+
+            # 限制更新频率，每0.1秒最多更新一次（使用仿真时间）
+            if self.last_update_time and current_time - self.last_update_time < 0.1:
+                return
+
+            self.last_update_time = current_time
+
+            # 构建虚拟树结构
+            self.build_virtual_tree_structures(self.destination_list)
+
+            # 更新拥塞信息
+            self.update_congestion_info()
+
+            # 评估树构建进度
+            if self.virtual_trees:
+                # 记录虚拟树节点数量历史
+                covered_nodes = set()
+                for _, tree in self.virtual_trees.items():
+                    covered_nodes.update(tree.keys())
+
+                self.virtual_nodes_history.append(len(covered_nodes))
+                if len(self.virtual_nodes_history) > 10:
+                    self.virtual_nodes_history = self.virtual_nodes_history[-10:]
+
+                # 记录上一次进度
+                old_progress = self.tree_build_progress
+
+                # 与DHyTP一致：完全基于时间因子计算进度
+                time_factor = min(1.0, elapsed_time / self.min_tree_build_time)
+                
+                # 进度直接等于时间因子
+                self.tree_build_progress = time_factor
+                
+                # 切换条件：只基于时间因子，与DHyTP保持一致
+                can_switch = elapsed_time >= self.min_tree_build_time
+
+                # 树已构建完成但尚未标记为ready时，立即标记为ready
+                if can_switch and not self.tree_ready:
+                    print(f"\n◆◆◆ CMTP树构建完成：时间={elapsed_time:.1f}s/{self.min_tree_build_time:.2f}s, 进度={self.tree_build_progress:.2f} ◆◆◆\n")
+                    self.tree_ready = True
+                    # 最终更新拥塞信息
+                    self.update_congestion_info()
+                elif not can_switch:
+                    # 进度有显著变化时才输出日志
+                    progress_change = self.tree_build_progress - old_progress
+                    if progress_change >= 0.1:
+                        # 禁用输出
+                        # print(f"◆ CMTP构建进度: {self.tree_build_progress:.2f} (时间:{elapsed_time:.2f}/{self.min_tree_build_time:.2f}秒)")
+                        pass
+                        
+                # 禁用调试输出
+                # print(f"◆ CMTP构建状态: 进度={self.tree_build_progress:.2f}, 时间={elapsed_time:.2f}/{self.min_tree_build_time:.2f}秒, 可切换={can_switch}, 树已就绪={self.tree_ready}")
+                
+    def reset_protocol_state(self):
+        """重置CMTP协议状态，用于新的实验轮次"""
+        self.tree_construction_started = False
+        self.destination_list = []
+        self.tree_build_progress = 0.0
+        self.tree_build_start_time = None
+        self.virtual_nodes_history = []
+        self.last_update_time = None
+        self.virtual_trees = None
+        self.root_nodes = None
+        self.root_groups = None
+        self.last_etx_to_root = {}
+        self.tree_ready = False
+        
+        # 清除所有计算缓存
+        if hasattr(self, '_neighbors_cache'):
+            self._neighbors_cache.clear()
+        if hasattr(self, '_prr_cache'):
+            self._prr_cache.clear()
+        if hasattr(self, '_etx_to_root_cache'):
+            self._etx_to_root_cache.clear()
+            
+        # 每次重置时不重新生成随机树构建时间，等到开始构建树时再生成
+        print("◆ CMTP协议状态已重置，准备新的实验轮次")
+        
+        # ## **** ENERGY MODIFICATION START: 重置能耗累积计数器 **** ##
+        self.accumulated_tree_creation_energy = 0.0
+        self.accumulated_tree_maintenance_energy = 0.0
+        self.tree_created = False
+        # ## **** ENERGY MODIFICATION END **** ##
 
     def build_virtual_tree_structures(self, destination_ids=None):
         """
@@ -30,6 +194,16 @@ class CMTPRoutingModel:
             destination_ids = list(self.uav_map.keys())
         self.root_nodes = []
         self.virtual_trees = {}
+        
+        # ## **** ENERGY MODIFICATION START: 记录树创建能耗 **** ##
+        from simulation_config import PROTOCOL_ENERGY_CONFIG, COLLECT_ENERGY_STATS
+        if COLLECT_ENERGY_STATS and not self.tree_created:
+            tree_creation_energy = PROTOCOL_ENERGY_CONFIG["CMTP"]["TREE_CREATION"]
+            self.accumulated_tree_creation_energy += tree_creation_energy
+            self.tree_created = True
+            print(f"⚡ CMTP: 累计树创建能耗 +{tree_creation_energy:.2f}J")
+        # ## **** ENERGY MODIFICATION END **** ##
+        
         # 论文MTP增强：路径合并机制
         self.root_groups = self._group_roots_by_distance(destination_ids)
         for group in self.root_groups:
@@ -119,6 +293,8 @@ class CMTPRoutingModel:
                 if link not in self.congestion_links:
                     self.congestion_links[link] = []
                 self.congestion_links[link].append(root_id)
+                
+        # 不再需要记录拥塞更新能耗，因为我们使用累积计数器并在最终分摊
 
     def calculate_expected_transmission_time(self, from_uav, to_uav, layer=0, packet=None, sim_time=None):
         """
@@ -149,8 +325,27 @@ class CMTPRoutingModel:
     def select_next_hop(self, current_uav, candidate_neighbors, layer=0, packet=None, sim_time=None):
         """
         在候选邻居中选择期望传输时间（ETT）最短的节点作为下一跳。
+        修改：在树构建完成前不选择下一跳。
         返回: (best_neighbor, min_ett)
         """
+        # 更新协议状态，确保传递正确的仿真时间
+        destination_id = packet.destination_id if packet and hasattr(packet, 'destination_id') else None
+        self.update_protocol_status([destination_id] if destination_id else None, sim_time)
+        
+        # 如果树正在构建中且未完成，不选择下一跳
+        if self.tree_construction_started and not self.tree_ready:
+            # 记录事件
+            if packet and hasattr(packet, 'add_event'):
+                elapsed = sim_time - (self.tree_build_start_time or sim_time)
+                remaining = max(0, self.min_tree_build_time - elapsed)
+                info = f"树构建中，进度={self.tree_build_progress:.2f}，已等待={elapsed:.1f}秒, 剩余≈{remaining:.1f}秒"
+                packet.add_event("cmtp_waiting_tree", getattr(current_uav, 'id', None), 
+                               getattr(packet, 'current_hop_index', None), 
+                               sim_time if sim_time is not None else 0, info)
+            # 返回None表示暂不转发
+            return None, float('inf')
+
+        # 树已构建完成，正常选择下一跳
         min_ett = float('inf')
         best_neighbor = None
         ett_map = {}
@@ -177,11 +372,12 @@ class CMTPRoutingModel:
             
         return best_neighbor, min_ett
 
-    def get_link_base_delay(self, uav1, uav2=None, root_id=None):
+    def get_link_base_delay(self, uav1, uav2=None, root_id=None, visited_nodes=None):
         """
         计算单跳ETX或到RootNode的ETX。
         - 若uav2不为None，则返回uav1到uav2的单跳ETX。
         - 若uav2为None且root_id不为None，则递归计算uav1到root的最小ETX。
+        添加缓存提高性能
         """
         if uav2 is not None:
             # 单跳ETX: 1 / PRR(x, y)
@@ -190,44 +386,139 @@ class CMTPRoutingModel:
                 return float('inf')
             return 1.0 / prr
         elif root_id is not None:
+            # 使用缓存优化递归计算
+            # 检查是否有单跳缓存
+            if not hasattr(self, '_etx_to_root_cache'):
+                self._etx_to_root_cache = {}
+                
+            cache_key = (uav1.id, root_id)
+            # 如果已经有缓存结果，直接返回
+            if cache_key in self._etx_to_root_cache:
+                return self._etx_to_root_cache[cache_key]
+                
             # 到RootNode的ETX: 递归最小{邻居ETX+单跳ETX}
             if uav1.id == root_id:
+                # 缓存结果并返回
+                self._etx_to_root_cache[cache_key] = 0.0
                 return 0.0
+                
+            # 初始化已访问节点集合，防止循环
+            if visited_nodes is None:
+                visited_nodes = set()
+                
+            # 如果当前节点已访问，返回无穷大以避免环路
+            if uav1.id in visited_nodes:
+                return float('inf')
+                
+            # 标记当前节点为已访问
+            visited_nodes.add(uav1.id)
+            
             min_etx = float('inf')
             for neighbor in self._get_neighbors(uav1):
-                etx_link = self.get_link_base_delay(uav1, neighbor)
-                etx_neighbor = self.get_link_base_delay(neighbor, None, root_id)
-                total_etx = etx_link + etx_neighbor
-                if total_etx < min_etx:
-                    min_etx = total_etx
+                # 只考虑未访问过的邻居
+                if neighbor.id not in visited_nodes:
+                    etx_link = self.get_link_base_delay(uav1, neighbor)
+                    # 递归计算邻居到根的ETX，传递已访问节点集合
+                    etx_neighbor = self.get_link_base_delay(neighbor, None, root_id, visited_nodes.copy())
+                    total_etx = etx_link + etx_neighbor
+                    if total_etx < min_etx:
+                        min_etx = total_etx
+                        
+            # 计算完成后移除当前节点标记，允许其他路径重用此节点
+            visited_nodes.remove(uav1.id)
+            
+            # 限制缓存大小
+            if len(self._etx_to_root_cache) > 2000:  # 允许更大的缓存，因为这个函数递归调用多
+                self._etx_to_root_cache.clear()
+                
+            # 缓存结果
+            self._etx_to_root_cache[cache_key] = min_etx
+            
             return min_etx
         else:
             raise ValueError("get_link_base_delay: uav2和root_id不能同时为None")
 
     def _get_prr(self, uav1, uav2):
-        """获取uav1到uav2的PRR，基于距离分段随机。"""
-        import random
-        dist = math.sqrt((uav1.x - uav2.x) ** 2 + (uav1.y - uav2.y) ** 2 + (uav1.z - uav2.z) ** 2)
+        """获取uav1到uav2的PRR，基于距离分段随机，使用缓存提高性能"""
+        # 计算距离（使用缓存版本）
+        dist = self._calculate_distance(uav1, uav2)
+        
+        # 使用距离区间作为键
+        if not hasattr(self, '_prr_cache'):
+            self._prr_cache = {}
+            
+        # 为了避免随机值在每次调用时都不同，我们对距离进行离散化处理
+        dist_key = int(dist * 10)  # 0.1的精度
+        
+        if dist_key in self._prr_cache:
+            return self._prr_cache[dist_key]
+        
+        # 从配置文件获取PRR上下限
+        from simulation_config import PRR_MIN, PRR_MAX
+        
+        # 计算PRR，区间平均分布
+        prr = 0
+        range_size = PRR_MAX - PRR_MIN  # 上下限差值
+        
         if dist <= 10:
-            return random.uniform(0.85, 0.9)
+            # 距离最近，使用最高PRR区间 (75%-100%范围)
+            prr_min = PRR_MIN + range_size * 0.75
+            prr_max = PRR_MAX
+            prr = random.uniform(prr_min, prr_max)
         elif dist <= 30:
-            return random.uniform(0.75, 0.85)
+            # 距离较近，使用较高PRR区间 (50%-75%范围)
+            prr_min = PRR_MIN + range_size * 0.5
+            prr_max = PRR_MIN + range_size * 0.75
+            prr = random.uniform(prr_min, prr_max)
         elif dist <= 60:
-            return random.uniform(0.65, 0.75)
+            # 距离中等，使用中等PRR区间 (25%-50%范围)
+            prr_min = PRR_MIN + range_size * 0.25
+            prr_max = PRR_MIN + range_size * 0.5
+            prr = random.uniform(prr_min, prr_max)
         elif dist <= 100:
-            return random.uniform(0.5, 0.65)
+            # 距离较远，使用较低PRR区间 (0%-25%范围)
+            prr_min = PRR_MIN
+            prr_max = PRR_MIN + range_size * 0.25
+            prr = random.uniform(prr_min, prr_max)
         else:
-            return 0
+            # 超出范围返回0
+            prr = 0
+        
+        # 限制缓存大小
+        if len(self._prr_cache) > 1000:
+            self._prr_cache.clear()
+        
+        # 存储结果
+        self._prr_cache[dist_key] = prr
+        
+        return prr
 
     def _get_neighbors(self, uav):
-        """获取uav的邻居节点（通信范围内）。"""
+        """获取uav的邻居节点（通信范围内），使用缓存提高性能"""
+        # 创建临时缓存键
+        cache_key = (id(uav), uav.x, uav.y, uav.z)
+        
+        # 检查是否有缓存
+        if hasattr(self, '_neighbors_cache') and cache_key in self._neighbors_cache:
+            return self._neighbors_cache[cache_key]
+        
+        # 如果没有缓存，则计算邻居
         neighbors = []
         for other in self.uav_map.values():
             if other.id == uav.id:
                 continue
-            dist = math.sqrt((uav.x - other.x) ** 2 + (uav.y - other.y) ** 2 + (uav.z - other.z) ** 2)
+            dist = self._calculate_distance(uav, other)
             if dist <= UAV_COMMUNICATION_RANGE:
                 neighbors.append(other)
+        
+        # 初始化缓存（如果需要）并存储结果
+        if not hasattr(self, '_neighbors_cache'):
+            self._neighbors_cache = {}
+        # 限制缓存大小
+        if len(self._neighbors_cache) > 1000:
+            self._neighbors_cache.clear()  # 防止内存泄漏，定期清空
+        self._neighbors_cache[cache_key] = neighbors
+        
         return neighbors
 
     def are_vectors_concurrent(self, p1, q1, p2, q2):
@@ -267,6 +558,15 @@ class CMTPRoutingModel:
         """
         if not self.virtual_trees or not self.root_nodes:
             return
+        
+        # ## **** ENERGY MODIFICATION START: 记录树维护能耗 **** ##
+        from simulation_config import PROTOCOL_ENERGY_CONFIG, COLLECT_ENERGY_STATS
+        if COLLECT_ENERGY_STATS:
+            tree_maintenance_energy = PROTOCOL_ENERGY_CONFIG["CMTP"]["TREE_MAINTENANCE"]
+            self.accumulated_tree_maintenance_energy += tree_maintenance_energy
+            print(f"⚡ CMTP: 累计树维护能耗 +{tree_maintenance_energy:.2f}J")
+        # ## **** ENERGY MODIFICATION END **** ##
+        
         for root_id in self.root_nodes:
             tree = self.virtual_trees[root_id]
             for node_id in list(tree.keys()):
@@ -293,7 +593,11 @@ class CMTPRoutingModel:
         min_etx = float('inf')
         best_parent = None
         for neighbor in self._get_neighbors(node):
-            etx = self.get_link_base_delay(node, neighbor) + self.get_link_base_delay(neighbor, None, root_id)
+            # 使用空的visited_nodes集合初始化搜索
+            etx_link = self.get_link_base_delay(node, neighbor)
+            etx_to_root = self.get_link_base_delay(neighbor, None, root_id, set())
+            etx = etx_link + etx_to_root
+            
             if etx < min_etx:
                 min_etx = etx
                 best_parent = neighbor
@@ -313,3 +617,15 @@ class CMTPRoutingModel:
                     self._update_etx_recursive(tree, child_id, etx_to_root + etx)
 
     # 可根据论文公式和仿真需求继续扩展更多方法 
+
+    def _calculate_distance(self, uav1, uav2):
+        """计算两个UAV之间的欧几里得距离"""
+        return self._calculate_distance_cached(
+            (uav1.x, uav1.y, uav1.z),
+            (uav2.x, uav2.y, uav2.z)
+        )
+        
+    @lru_cache(maxsize=1024)
+    def _calculate_distance_cached(self, pos1, pos2):
+        """缓存版本的距离计算，使用坐标元组作为参数"""
+        return math.sqrt((pos1[0] - pos2[0]) ** 2 + (pos1[1] - pos2[1]) ** 2 + (pos1[2] - pos2[2]) ** 2) 
