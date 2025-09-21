@@ -1,0 +1,10 @@
+# UAV 仿真系统依赖库
+# Web 框架
+Flask==2.3.3
+flask-cors==4.0.0
+
+# 数值计算和科学计算
+numpy==1.24.3
+
+# 标准库（无需安装，但列出以供参考）
+# threading, time, math, random, collections, heapq, os, functools, logging, datetime, importlib
