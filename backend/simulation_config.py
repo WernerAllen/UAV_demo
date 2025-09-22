@@ -110,10 +110,18 @@ PROTOCOL_ENERGY_CONFIG = {
 
 # 树剪枝机制配置参数
 TREE_PRUNING_ENABLED = True  # 是否启用树剪枝机制
-ELLIPSE_ECCENTRICITY = 0.8   # 椭圆偏心率 (0 < e < 1)
-ELLIPSE_EXPANSION_FACTOR = 1.2  # 椭圆扩展因子，用于扩大搜索范围
-PRUNING_UPDATE_INTERVAL = 0.5  # ETX更新间隔时间(秒)
-ELLIPSE_BOUNDARY_TOLERANCE = 5.0  # 椭圆边界容差(米)，用于判断节点是否在椭圆内
+
+# 椭圆参数配置（影响剪枝效果和性能）
+ELLIPSE_ECCENTRICITY = 0.7   # 椭圆偏心率 (0 < e < 1) 
+                             # 0.6=保守 | 0.7=平衡 | 0.8=激进
+ELLIPSE_EXPANSION_FACTOR = 1.15  # 椭圆扩展因子，用于扩大搜索范围
+                                 # 1.1=激进 | 1.15=平衡 | 1.3=保守
+ELLIPSE_BOUNDARY_TOLERANCE = 4.0  # 椭圆边界容差(米)，用于判断节点是否在椭圆内
+                                  # 3.0=严格 | 4.0=平衡 | 8.0=宽松
+
+# 更新频率配置（影响实时性和计算开销）
+PRUNING_UPDATE_INTERVAL = 0.4  # ETX更新间隔时间(秒)
+                               # 0.3=高频 | 0.4=平衡 | 0.6=低频
 # - 仿真结束后计算: 总能耗 / 成功传输的数据包数 = 平均每包能耗
 
 

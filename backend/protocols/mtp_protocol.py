@@ -69,7 +69,7 @@ class MTPRoutingModel:
         
         if not current_pruning_enabled:
             # 未启用剪枝：基于网络规模的基础构建时间，但考虑网络拓扑复杂度
-            base_time = len(self.uav_map) * 0.002  # 每个节点需要0.002秒
+            base_time = len(self.uav_map) * 0.001  # 每个节点需要0.001秒
             complexity_factor = len(self.destination_list) * 0.05  # 目标节点复杂度
             
             # 新增：考虑网络拓扑复杂度（即使无剪枝也应该考虑UAV分布）
@@ -121,7 +121,7 @@ class MTPRoutingModel:
             pruning_rate = 0.0
             
         # 基础构建时间（大幅缩短）
-        base_time = total_nodes * 0.002  # 每个节点0.002秒
+        base_time = total_nodes * 0.001  # 每个节点0.001秒
         complexity_factor = len(self.destination_list) * 0.05  # 目标节点复杂度
         
         # 应用剪枝优化：剪枝率越高，时间减少越多
@@ -682,28 +682,76 @@ class MTPRoutingModel:
         return neighbors
 
     def are_vectors_concurrent(self, p1, q1, p2, q2):
-        """MTP下判断向量并发（可根据需要实现）"""
-        return False  # 默认无并发
+        """
+        MTP下判断向量并发：基于拥塞链路信息检查两条传输向量是否并发
+        采用DHyTP协议的实用方法，基于实际的拥塞链路信息而不是复杂的几何计算
+        
+        Args:
+            p1, q1: 第一条向量的起点和终点坐标/ID
+            p2, q2: 第二条向量的起点和终点坐标/ID
+            
+        Returns:
+            bool: 如果两条向量并发则返回True
+        """
+        # 将向量端点转换为链路表示
+        link1 = tuple(sorted([p1, q1]))
+        link2 = tuple(sorted([p2, q2]))
+
+        # 检查是否有拥塞链路信息
+        if not hasattr(self, 'congestion_links') or not self.congestion_links:
+            return False
+
+        # 检查两个链路是否有共同的根节点（表示并发）
+        roots1 = set(self.congestion_links.get(link1, []))
+        roots2 = set(self.congestion_links.get(link2, []))
+
+        return bool(roots1 & roots2)
 
     def calculate_concurrent_region_delay(self, vec1_p1, vec1_q1, vec2_p2, vec2_q2):
         """
-        计算并发区域的延迟。这里简化为：若两条链路在congestion_links中重叠，则返回常数拥塞延迟。
+        计算并发区域的延迟：采用DHyTP协议的实用方法
+        基于实际的拥塞信息和PRR计算，而不是复杂的空间计算
+        
+        Args:
+            vec1_p1, vec1_q1: 第一条向量的起点和终点
+            vec2_p2, vec2_q2: 第二条向量的起点和终点
+            
+        Returns:
+            float: 并发延迟惩罚值
         """
-        # 将向量端点映射为链路，使用UAV ID而不是对象本身进行排序，避免递归比较错误
-        link1 = tuple(sorted([vec1_p1.id if hasattr(vec1_p1, 'id') else vec1_p1, 
-                             vec1_q1.id if hasattr(vec1_q1, 'id') else vec1_q1]))
-        link2 = tuple(sorted([vec2_p2.id if hasattr(vec2_p2, 'id') else vec2_p2, 
-                             vec2_q2.id if hasattr(vec2_q2, 'id') else vec2_q2]))
-        # 检查是否为同一链路或有重叠
-        if hasattr(self, 'congestion_links'):
-            if link1 in self.congestion_links and link2 in self.congestion_links:
-                # 若两链路都在拥塞集合，且有共同root，视为并发
-                roots1 = set(self.congestion_links[link1])
-                roots2 = set(self.congestion_links[link2])
-                if roots1 & roots2:
-                    return 0.2  # 拥塞延迟常数，可根据实际情况调整
+        # 检查两条向量是否并发
+        if self.are_vectors_concurrent(vec1_p1, vec1_q1, vec2_p2, vec2_q2):
+            # 基于链路的PRR计算拥塞延迟（采用DHyTP的方法）
+            uav1 = self.uav_map.get(vec1_p1) if isinstance(vec1_p1, (int, str)) else None
+            uav2 = self.uav_map.get(vec1_q1) if isinstance(vec1_q1, (int, str)) else None
+            
+            # 如果输入是坐标而不是UAV ID，则寻找最近的UAV
+            if uav1 is None and isinstance(vec1_p1, (tuple, list)) and len(vec1_p1) >= 2:
+                uav1 = self._find_closest_uav(vec1_p1[0], vec1_p1[1])
+            if uav2 is None and isinstance(vec1_q1, (tuple, list)) and len(vec1_q1) >= 2:
+                uav2 = self._find_closest_uav(vec1_q1[0], vec1_q1[1])
+                
+            if uav1 and uav2:
+                prr = self._get_prr(uav1, uav2)
+                if prr > 0:
+                    # 使用DHyTP的计算方法：基于PRR和假设的50%利用率
+                    return (1.0 / prr) * 0.5
+                    
         return 0.0
 
+    def _find_closest_uav(self, x, y):
+        """根据坐标找到最近的UAV"""
+        min_distance = float('inf')
+        closest_uav = None
+        
+        for uav in self.uav_map.values():
+            dist = math.sqrt((uav.x - x) ** 2 + (uav.y - y) ** 2)
+            if dist < min_distance:
+                min_distance = dist
+                closest_uav = uav
+                
+        return closest_uav
+    
     def get_grid_cell(self, x, y):
         """根据坐标获取所在网格的索引。"""
         if not (0 <= x < MAX_X and 0 <= y < MAX_Y):

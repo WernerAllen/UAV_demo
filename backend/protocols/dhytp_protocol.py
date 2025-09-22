@@ -86,8 +86,8 @@ class DHyTPRoutingModel:
         DHyTP版本：考虑PTP到MTP的转换开销
         """
         if not TREE_PRUNING_ENABLED:
-            # 未启用剪枝：基于网络规模的基础构建时间（大幅缩短）
-            base_time = len(self.uav_map) * 0.002  # 每个节点需要0.003秒（原来0.025秒太长）
+            # 未启用剪枝：基于网络规模的基础构建时间
+            base_time = len(self.uav_map) * 0.001  # 每个节点需要0.001秒
             complexity_factor = len(self.destination_list) * 0.05  # 目标节点复杂度
             phase_transition_cost = 0.02  # PTP到MTP转换开销
             total_time = base_time + complexity_factor + phase_transition_cost
@@ -136,7 +136,7 @@ class DHyTPRoutingModel:
             pruning_rate = 0.0
             
         # 基础构建时间（大幅缩短）
-        base_time = total_nodes * 0.002  # 每个节点0.003秒
+        base_time = total_nodes * 0.001  # 每个节点0.001秒
         complexity_factor = len(self.destination_list) * 0.05  # 目标节点复杂度
         phase_transition_cost = 0.02  # PTP到MTP转换开销
         

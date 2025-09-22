@@ -77,7 +77,7 @@ class ExperimentManager:
     # ## **** MODIFICATION START: 重构实验核心逻辑 **** ##
     def _run_experiment_logic(self, total_rounds, sd_pairs, num_uavs):
         self.all_round_actual_paths = []  # 每次实验重置
-        MAX_STEPS_PER_ROUND = 200 # 最大步数保护，每步即为一个时间片
+        MAX_STEPS_PER_ROUND = 30 # 最大步数保护，每步即为一个时间片
         valid_rounds = 0
         round_index = 0
         self.total_delivery_time = 0.0
