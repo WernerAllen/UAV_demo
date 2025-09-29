@@ -45,13 +45,67 @@ header h1 {
     flex-direction: column;
 }
 
-#simulationCanvas {
+/* Canvas容器样式 */
+.canvas-container {
+    display: flex;
+    gap: 15px;
+    margin-bottom: 20px;
+    width: 100%;
+}
+
+.canvas-panel {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+}
+
+.canvas-header {
+    text-align: center;
+    padding: 8px;
+    background-color: #f5f5f5;
+    border: 1px solid #ddd;
+    border-bottom: none;
+    border-radius: 4px 4px 0 0;
+}
+
+.canvas-header h3 {
+    margin: 0;
+    font-size: 0.9em;
+    color: #333;
+    font-weight: bold;
+}
+
+.mtp-panel .canvas-header {
+    background-color: #e8f5e8;
+}
+
+.mtp-panel .canvas-header h3 {
+    color: #2e7d32;
+}
+
+#simulationCanvas, #mtpCanvas {
     width: 100%;
     height: auto;
     aspect-ratio: 1 / 1;
     background-color: #fdfdfd;
     border: 1px solid #ccc;
-    border-radius: 4px;
+    border-radius: 0 0 4px 4px;
+    max-width: 400px;
+}
+
+#mtpCanvas {
+    background-color: #f9fff9;
+    border-color: #81c784;
+}
+
+/* 当只显示单个canvas时的样式 */
+.canvas-container.single-canvas .canvas-panel {
+    flex: none;
+    margin: 0 auto;
+}
+
+.canvas-container.single-canvas #simulationCanvas {
+    max-width: 600px;
 }
 
 .controls-area {

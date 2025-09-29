@@ -6,6 +6,12 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!canvas) { console.error("Canvas element not found!"); return; }
     const ctx = canvas.getContext('2d');
     
+    // MTP协议对照组canvas
+    const mtpCanvas = document.getElementById('mtpCanvas');
+    const mtpCtx = mtpCanvas ? mtpCanvas.getContext('2d') : null;
+    const canvasContainer = document.getElementById('canvasContainer');
+    const mtpCanvasPanel = document.getElementById('mtpCanvasPanel');
+    
     const startButton = document.getElementById('startButton');
     const stepButton = document.getElementById('stepButton');
     const autoStepButton = document.getElementById('autoStepButton');
@@ -45,7 +51,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let singleShortestPath = null;
     let staticExperimentPaths = [];
     let allExperimentRoundsData = [];
-    let previousExperimentStatus = null; 
+    let previousExperimentStatus = null;
+    let currentProtocol = null; // 当前使用的协议
+    let mtpPruningData = null; // MTP协议剪枝数据 
 
     // --- 核心功能 ---
     async function apiCall(endpoint, method = 'GET', body = null) {
@@ -74,6 +82,17 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         // 如果有网格配置则更新，否则设置为null（非PTP协议）
         currentGridConfig = stateData.grid_config || null;
+        
+        // 更新协议信息和MTP剪枝数据
+        if (stateData.protocol) {
+            currentProtocol = stateData.protocol;
+        }
+        if (stateData.mtp_pruning_data) {
+            mtpPruningData = stateData.mtp_pruning_data;
+        }
+        
+        // 根据协议类型显示/隐藏MTP对照组canvas
+        updateCanvasDisplay();
         // 优先mac_packet_status，其次mac_log，展示格式不变
         if (stateData.mac_packet_status) {
             renderMacLog(stateData.mac_packet_status.map(pkt =>
@@ -95,20 +114,186 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!ctx) return;
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         // 只有当currentGridConfig存在时才绘制网格背景（PTP协议）
-        if (currentGridConfig) drawGridBackground();
-        if (currentUAVs) currentUAVs.forEach(drawUAV);
+        if (currentGridConfig) drawGridBackground(ctx);
+        if (currentUAVs) currentUAVs.forEach(uav => drawUAV(ctx, uav));
         if (staticExperimentPaths && staticExperimentPaths.length > 0) {
-            drawMultiplePaths(staticExperimentPaths);
+            drawMultiplePaths(ctx, staticExperimentPaths);
         } else if (singleShortestPath) {
-            drawPath(singleShortestPath, 'rgba(255, 0, 0, 0.7)');
+            drawPath(ctx, singleShortestPath, 'rgba(255, 0, 0, 0.7)');
         }
         if (currentPackets) currentPackets.forEach(packet => {
             const holderUAV = uavMap.get(packet.current_holder_id);
-            if (holderUAV) drawPacket(holderUAV, packet);
+            if (holderUAV) drawPacket(ctx, holderUAV, packet);
         });
+        
+        // 如果是MTP协议，同时更新MTP对照组canvas
+        if (currentProtocol === 'MTP' && mtpCtx) {
+            redrawMTPCanvas();
+        }
     }
 
-    function drawGridBackground() {
+    // 添加canvas显示控制函数
+    function updateCanvasDisplay() {
+        if (!canvasContainer || !mtpCanvasPanel) return;
+        
+        if (currentProtocol === 'MTP') {
+            // 显示双canvas布局
+            canvasContainer.classList.remove('single-canvas');
+            mtpCanvasPanel.style.display = 'flex';
+        } else {
+            // 显示单canvas布局
+            canvasContainer.classList.add('single-canvas');
+            mtpCanvasPanel.style.display = 'none';
+        }
+    }
+
+    // MTP对照组canvas绘制函数
+    function redrawMTPCanvas() {
+        if (!mtpCtx) return;
+        
+        mtpCtx.clearRect(0, 0, mtpCanvas.width, mtpCanvas.height);
+        
+        // 绘制所有UAV节点（与原canvas保持一致的位置）
+        if (currentUAVs) {
+            currentUAVs.forEach(uav => drawUAV(mtpCtx, uav));
+        }
+        
+        // 只有在有MTP剪枝数据时才绘制椭圆和标记
+        if (mtpPruningData) {
+            // 绘制剪枝椭圆区域
+            if (mtpPruningData.ellipses && mtpPruningData.ellipses.length > 0) {
+                const pathCount = staticExperimentPaths ? staticExperimentPaths.length : 0;
+                console.log(`🔍 数据检查: 椭圆数量=${mtpPruningData.ellipses.length}, 路径数量=${pathCount}`);
+                
+                if (mtpPruningData.ellipses.length !== pathCount && pathCount > 0) {
+                    console.warn(`⚠️ 椭圆数量与路径数量不匹配！椭圆:${mtpPruningData.ellipses.length} vs 路径:${pathCount}`);
+                }
+                
+                mtpPruningData.ellipses.forEach((ellipse, index) => {
+                    console.log(`🎨 绘制椭圆${index + 1}: ${ellipse.source_id}→${ellipse.dest_id}`);
+                    drawPruningEllipse(mtpCtx, ellipse);
+                });
+            }
+            
+            // 标注合并的目的节点
+            if (mtpPruningData.merge_targets && mtpPruningData.merge_targets.length > 0) {
+                console.log(`🎯 标注${mtpPruningData.merge_targets.length}个合并目标`);
+                mtpPruningData.merge_targets.forEach(target => {
+                    highlightMergeTarget(mtpCtx, target);
+                });
+            }
+        } else {
+            console.log('🚫 没有MTP剪枝数据，只显示UAV节点');
+        }
+        
+        // 如果有当前路径，也在MTP canvas上显示
+        if (staticExperimentPaths && staticExperimentPaths.length > 0) {
+            drawMultiplePaths(mtpCtx, staticExperimentPaths);
+        } else if (singleShortestPath) {
+            drawPath(mtpCtx, singleShortestPath, 'rgba(255, 0, 0, 0.7)');
+        }
+        
+        // 绘制图例
+        drawMTPLegend(mtpCtx);
+    }
+    
+    // 绘制MTP协议图例
+    function drawMTPLegend(context) {
+        const legendX = 10;
+        const legendY = 10;
+        const lineHeight = 25;
+        let currentY = legendY;
+        
+        context.save();
+        context.fillStyle = 'rgba(255, 255, 255, 0.9)';
+        context.strokeStyle = '#ccc';
+        context.lineWidth = 1;
+        
+        // 绘制图例背景
+        const legendHeight = 180;
+        context.fillRect(legendX - 5, legendY - 5, 200, legendHeight);
+        context.strokeRect(legendX - 5, legendY - 5, 200, legendHeight);
+        
+        // 图例标题
+        context.fillStyle = '#333';
+        context.font = 'bold 14px Arial';
+        context.fillText('MTP协议图例', legendX + 5, currentY + 15);
+        currentY += 30;
+        
+        // 普通路径
+        context.font = '12px Arial';
+        context.strokeStyle = '#FF4136';
+        context.lineWidth = 2;
+        context.setLineDash([]);
+        context.beginPath();
+        context.moveTo(legendX, currentY);
+        context.lineTo(legendX + 25, currentY);
+        context.stroke();
+        context.fillStyle = '#333';
+        context.fillText('普通路径', legendX + 35, currentY + 4);
+        currentY += lineHeight;
+        
+        // 合并路径
+        context.strokeStyle = '#0074D9';
+        context.lineWidth = 4;
+        context.setLineDash([8, 4]);
+        context.shadowColor = '#0074D9';
+        context.shadowBlur = 2;
+        context.beginPath();
+        context.moveTo(legendX, currentY);
+        context.lineTo(legendX + 25, currentY);
+        context.stroke();
+        context.shadowBlur = 0;
+        context.fillText('合并路径（粗虚线）', legendX + 35, currentY + 4);
+        currentY += lineHeight;
+        
+        // 合并连接线
+        context.strokeStyle = 'rgba(255, 165, 0, 0.8)';
+        context.lineWidth = 2;
+        context.setLineDash([3, 3]);
+        context.beginPath();
+        context.moveTo(legendX, currentY);
+        context.lineTo(legendX + 25, currentY);
+        context.stroke();
+        context.fillText('合并组连接', legendX + 35, currentY + 4);
+        currentY += lineHeight;
+        
+        // 合并目标节点
+        context.setLineDash([]);
+        context.strokeStyle = 'red';
+        context.lineWidth = 3;
+        context.beginPath();
+        context.arc(legendX + 12, currentY, 8, 0, Math.PI * 2);
+        context.stroke();
+        context.beginPath();
+        context.arc(legendX + 12, currentY, 4, 0, Math.PI * 2);
+        context.stroke();
+        context.fillStyle = 'red';
+        context.font = 'bold 10px Arial';
+        context.textAlign = 'center';
+        context.fillText('T', legendX + 12, currentY + 3);
+        context.textAlign = 'start';
+        context.fillStyle = '#333';
+        context.font = '12px Arial';
+        context.fillText('合并目标', legendX + 35, currentY + 4);
+        currentY += lineHeight;
+        
+        // 椭圆剪枝区域
+        context.strokeStyle = 'orange';
+        context.lineWidth = 2;
+        context.setLineDash([5, 5]);
+        context.fillStyle = 'rgba(255, 165, 0, 0.1)';
+        context.beginPath();
+        context.ellipse(legendX + 12, currentY, 15, 8, 0, 0, Math.PI * 2);
+        context.fill();
+        context.stroke();
+        context.fillStyle = '#333';
+        context.fillText('椭圆剪枝区域', legendX + 35, currentY + 4);
+        
+        context.restore();
+    }
+
+    function drawGridBackground(context) {
         const { rows, cols, prr_map, width, height } = currentGridConfig;
         if (!rows || !cols || !prr_map) return;
         const cellWidth = width / cols;
@@ -119,77 +304,336 @@ document.addEventListener('DOMContentLoaded', () => {
                 const greenVal = Math.floor(255 * prr);
                 const redVal = Math.floor(255 * (1 - prr));
                 const alpha = 0.4 * (1 - prr) + 0.05;
-                ctx.fillStyle = `rgba(${redVal}, ${greenVal}, 0, ${alpha})`;
-                ctx.fillRect(c * cellWidth, r * cellHeight, cellWidth, cellHeight);
-                ctx.fillStyle = '#555';
-                ctx.font = '14px Arial';
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-                ctx.fillText(`${prr.toFixed(2)}`, c * cellWidth + cellWidth / 2, r * cellHeight + cellHeight / 2);
+                context.fillStyle = `rgba(${redVal}, ${greenVal}, 0, ${alpha})`;
+                context.fillRect(c * cellWidth, r * cellHeight, cellWidth, cellHeight);
+                context.fillStyle = '#555';
+                context.font = '14px Arial';
+                context.textAlign = 'center';
+                context.textBaseline = 'middle';
+                context.fillText(`${prr.toFixed(2)}`, c * cellWidth + cellWidth / 2, r * cellHeight + cellHeight / 2);
             }
         }
-        ctx.textAlign = 'start';
-        ctx.textBaseline = 'alphabetic';
+        context.textAlign = 'start';
+        context.textBaseline = 'alphabetic';
     }
 
-    function drawUAV(uav) {
+    function drawUAV(context, uav) {
         if (typeof uav.x !== 'number' || typeof uav.y !== 'number') return;
-        ctx.beginPath();
-        ctx.arc(uav.x, uav.y, UAV_RADIUS, 0, Math.PI * 2);
-        ctx.fillStyle = uav.color || 'gray';
-        ctx.fill();
-        ctx.strokeStyle = 'black';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        ctx.fillStyle = 'black';
-        ctx.font = '12px Arial';
-        ctx.fillText(uav.id, uav.x + UAV_RADIUS, uav.y - UAV_RADIUS);
+        context.beginPath();
+        context.arc(uav.x, uav.y, UAV_RADIUS, 0, Math.PI * 2);
+        context.fillStyle = uav.color || 'gray';
+        context.fill();
+        context.strokeStyle = 'black';
+        context.lineWidth = 1;
+        context.stroke();
+        context.fillStyle = 'black';
+        context.font = '12px Arial';
+        context.fillText(uav.id, uav.x + UAV_RADIUS, uav.y - UAV_RADIUS);
     }
 
-    function drawPacket(uav, packet) {
+    function drawPacket(context, uav, packet) {
         const packetSize = 6;
         const packetOffsetX = -12;
         const packetOffsetY = -12;
-        ctx.save();
-        if (packet.status === 'delivered') ctx.fillStyle = 'lime';
-        else if (packet.status.startsWith('failed')) ctx.fillStyle = 'black';
-        else ctx.fillStyle = 'orange';
-        ctx.fillRect(uav.x + packetOffsetX, uav.y + packetOffsetY, packetSize, packetSize);
-        ctx.lineWidth = 1;
-        ctx.strokeStyle = 'black';
-        ctx.strokeRect(uav.x + packetOffsetX, uav.y + packetOffsetY, packetSize, packetSize);
-        ctx.restore();
+        context.save();
+        if (packet.status === 'delivered') context.fillStyle = 'lime';
+        else if (packet.status.startsWith('failed')) context.fillStyle = 'black';
+        else context.fillStyle = 'orange';
+        context.fillRect(uav.x + packetOffsetX, uav.y + packetOffsetY, packetSize, packetSize);
+        context.lineWidth = 1;
+        context.strokeStyle = 'black';
+        context.strokeRect(uav.x + packetOffsetX, uav.y + packetOffsetY, packetSize, packetSize);
+        context.restore();
     }
     
-    function drawMultiplePaths(pathsData) {
+    function drawMultiplePaths(context, pathsData) {
         const colors = ['#FF4136', '#0074D9', '#2ECC40', '#FFDC00', '#B10DC9', '#FF851B', '#7FDBFF', '#3D9970'];
+        
+        // 获取合并信息用于路径分组显示
+        const mergeInfo = getMergePathGroups(pathsData);
+        
         pathsData.forEach((pathInfo, index) => {
             const color = colors[index % colors.length];
             if (pathInfo.path) {
-                drawPath(pathInfo.path, color);
+                // 检查是否为合并路径
+                const isMergedPath = mergeInfo.mergedPaths.includes(index);
+                const mergeGroupId = mergeInfo.pathToGroup[index];
+                
+                if (isMergedPath) {
+                    // 合并路径用特殊样式：更粗的线条 + 虚线效果
+                    drawMergedPath(context, pathInfo.path, color, mergeGroupId);
+                } else {
+                    // 普通路径
+                    drawPath(context, pathInfo.path, color);
+                }
             }
         });
+        
+        // 绘制合并组连接线
+        drawMergeGroupConnections(context, mergeInfo.groups, pathsData);
     }
 
-    function drawPath(pathNodeIds, color) {
+    function drawPath(context, pathNodeIds, color) {
         if (!pathNodeIds || pathNodeIds.length < 2) return;
         for (let i = 0; i < pathNodeIds.length - 1; i++) {
             const uav1 = uavMap.get(pathNodeIds[i]);
             const uav2 = uavMap.get(pathNodeIds[i+1]);
-            if (uav1 && uav2) drawArrow(ctx, uav1.x, uav1.y, uav2.x, uav2.y, 10, color);
+            if (uav1 && uav2) drawArrow(context, uav1.x, uav1.y, uav2.x, uav2.y, 10, color);
         }
     }
 
-    function drawArrow(ctx, fromX, fromY, toX, toY, arrowSize = 10, color = 'rgba(255, 0, 0, 0.7)') {
+    // 获取合并路径分组信息
+    function getMergePathGroups(pathsData) {
+        const mergeInfo = {
+            mergedPaths: [],      // 被合并的路径索引
+            pathToGroup: {},      // 路径索引 -> 组ID映射
+            groups: []            // 合并组信息
+        };
+        
+        if (!mtpPruningData || !mtpPruningData.merge_targets) {
+            return mergeInfo;
+        }
+        
+        // 根据merge_targets创建合并组
+        const groupMap = new Map(); // main_root_id -> group info
+        
+        mtpPruningData.merge_targets.forEach(target => {
+            const mainRootId = target.main_root_id;
+            if (!groupMap.has(mainRootId)) {
+                groupMap.set(mainRootId, {
+                    id: mainRootId,
+                    mainRoot: mainRootId,
+                    targets: [],
+                    pathIndices: []
+                });
+            }
+            groupMap.get(mainRootId).targets.push(target.uav_id);
+        });
+        
+        // 找出对应的路径索引
+        pathsData.forEach((pathInfo, index) => {
+            const destination = pathInfo.destination;
+            
+            // 检查是否为合并组的目标节点
+            for (const [groupId, group] of groupMap) {
+                if (destination === group.mainRoot || group.targets.includes(destination)) {
+                    group.pathIndices.push(index);
+                    mergeInfo.pathToGroup[index] = groupId;
+                    
+                    if (group.targets.includes(destination)) {
+                        mergeInfo.mergedPaths.push(index);
+                    }
+                }
+            }
+        });
+        
+        mergeInfo.groups = Array.from(groupMap.values()).filter(group => group.pathIndices.length > 1);
+        
+        console.log('🔗 合并路径分析:', mergeInfo);
+        return mergeInfo;
+    }
+    
+    // 绘制合并路径（特殊样式）
+    function drawMergedPath(context, pathNodeIds, color, groupId) {
+        if (!pathNodeIds || pathNodeIds.length < 2) return;
+        
+        context.save();
+        context.setLineDash([8, 4]); // 虚线样式
+        context.lineWidth = 4; // 更粗的线条
+        context.shadowColor = color;
+        context.shadowBlur = 3;
+        
+        for (let i = 0; i < pathNodeIds.length - 1; i++) {
+            const uav1 = uavMap.get(pathNodeIds[i]);
+            const uav2 = uavMap.get(pathNodeIds[i + 1]);
+            if (uav1 && uav2) {
+                drawArrow(context, uav1.x, uav1.y, uav2.x, uav2.y, 12, color);
+            }
+        }
+        
+        context.restore();
+    }
+    
+    // 绘制合并组之间的连接线
+    function drawMergeGroupConnections(context, groups, pathsData) {
+        if (!groups || groups.length === 0) return;
+        
+        groups.forEach(group => {
+            if (group.pathIndices.length < 2) return;
+            
+            context.save();
+            context.strokeStyle = 'rgba(255, 165, 0, 0.6)'; // 橙色连接线
+            context.lineWidth = 2;
+            context.setLineDash([3, 3]);
+            
+            // 找到组内路径的目标节点
+            const targetNodes = group.pathIndices.map(pathIndex => {
+                const pathInfo = pathsData[pathIndex];
+                return uavMap.get(pathInfo.destination);
+            }).filter(node => node);
+            
+            // 在合并目标之间绘制连接线
+            for (let i = 0; i < targetNodes.length - 1; i++) {
+                const node1 = targetNodes[i];
+                const node2 = targetNodes[i + 1];
+                if (node1 && node2) {
+                    context.beginPath();
+                    context.moveTo(node1.x, node1.y);
+                    context.lineTo(node2.x, node2.y);
+                    context.stroke();
+                }
+            }
+            
+            context.restore();
+        });
+    }
+
+    function drawArrow(context, fromX, fromY, toX, toY, arrowSize = 10, color = 'rgba(255, 0, 0, 0.7)') {
         const angle = Math.atan2(toY - fromY, toX - fromX);
-        ctx.save();
-        ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.moveTo(fromX, fromY); ctx.lineTo(toX, toY); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(toX, toY);
-        ctx.lineTo(toX - arrowSize * Math.cos(angle - Math.PI / 6), toY - arrowSize * Math.sin(angle - Math.PI / 6));
-        ctx.lineTo(toX - arrowSize * Math.cos(angle + Math.PI / 6), toY - arrowSize * Math.sin(angle + Math.PI / 6));
-        ctx.closePath(); ctx.fill();
-        ctx.restore();
+        context.save();
+        context.strokeStyle = color; 
+        context.fillStyle = color; 
+        context.lineWidth = context.lineWidth || 2; // 保持当前线宽
+        context.beginPath(); 
+        context.moveTo(fromX, fromY); 
+        context.lineTo(toX, toY); 
+        context.stroke();
+        context.beginPath(); 
+        context.moveTo(toX, toY);
+        context.lineTo(toX - arrowSize * Math.cos(angle - Math.PI / 6), toY - arrowSize * Math.sin(angle - Math.PI / 6));
+        context.lineTo(toX - arrowSize * Math.cos(angle + Math.PI / 6), toY - arrowSize * Math.sin(angle + Math.PI / 6));
+        context.closePath(); 
+        context.fill();
+        context.restore();
+    }
+
+    // MTP协议特有的绘制函数
+    function drawPruningEllipse(context, ellipse) {
+        if (!ellipse || !ellipse.center_x || !ellipse.center_y || !ellipse.a || !ellipse.b) return;
+        
+        context.save();
+        context.setLineDash([5, 5]); // 虚线
+        context.strokeStyle = 'rgba(255, 165, 0, 0.8)'; // 橙色
+        context.lineWidth = 2;
+        
+        context.beginPath();
+        context.ellipse(
+            ellipse.center_x, 
+            ellipse.center_y,
+            ellipse.a, // 长半轴
+            ellipse.b, // 短半轴
+            ellipse.rotation || 0, // 旋转角度（弧度）
+            0, 
+            2 * Math.PI
+        );
+        context.stroke();
+        
+        // 填充半透明区域
+        context.fillStyle = 'rgba(255, 165, 0, 0.1)';
+        context.fill();
+        
+        context.restore();
+    }
+
+    function highlightMergeTarget(context, target) {
+        const uav = uavMap.get(target.uav_id);
+        if (!uav) return;
+        
+        context.save();
+        
+        // 绘制目标节点的特殊标记（双环圈）
+        context.strokeStyle = 'red';
+        context.lineWidth = 3;
+        context.setLineDash([]);
+        
+        // 外环
+        context.beginPath();
+        context.arc(uav.x, uav.y, UAV_RADIUS + 8, 0, Math.PI * 2);
+        context.stroke();
+        
+        // 内环
+        context.beginPath();
+        context.arc(uav.x, uav.y, UAV_RADIUS + 4, 0, Math.PI * 2);
+        context.stroke();
+        
+        // 添加"T"标记表示Target
+        context.fillStyle = 'red';
+        context.font = 'bold 10px Arial';
+        context.textAlign = 'center';
+        context.textBaseline = 'middle';
+        context.fillText('T', uav.x, uav.y + UAV_RADIUS + 20);
+        
+        context.restore();
+    }
+
+    // 获取MTP剪枝数据的函数（带重试机制）
+    async function fetchMTPPruningData(retryCount = 0) {
+        try {
+            const pathCount = staticExperimentPaths ? staticExperimentPaths.length : 0;
+            console.log(`🔍 [重试${retryCount}] 获取MTP剪枝数据，当前路径数量: ${pathCount}`);
+            
+            const result = await apiCall('simulation/mtp-pruning-data');
+            if (result && result.ok && result.data) {
+                mtpPruningData = result.data;
+                const ellipseCount = mtpPruningData.ellipses?.length || 0;
+                const targetCount = mtpPruningData.merge_targets?.length || 0;
+                
+                console.log('🔍 获取到MTP剪枝数据:', mtpPruningData);
+                console.log('🔍 椭圆区域数量:', ellipseCount);
+                console.log('🔍 合并目标数量:', targetCount);
+                console.log(`🔍 数据匹配检查: 椭圆=${ellipseCount} vs 路径=${pathCount}`);
+                
+                // 检查椭圆数量是否与路径数量匹配
+                if (pathCount > 0 && ellipseCount !== pathCount) {
+                    console.warn(`⚠️ 椭圆数量(${ellipseCount})与路径数量(${pathCount})不匹配！`);
+                }
+                
+                // 如果没有数据且重试次数少于3次，等待一下再重试
+                if (ellipseCount === 0 && retryCount < 3) {
+                    console.log(`🔄 椭圆数据为空，等待500ms后重试 (${retryCount + 1}/3)`);
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    return await fetchMTPPruningData(retryCount + 1);
+                }
+                
+                if (ellipseCount === pathCount) {
+                    console.log('✅ 椭圆数量与路径数量匹配！');
+                }
+            } else {
+                console.warn("MTP剪枝数据为空或格式错误:", result);
+            }
+        } catch (error) {
+            console.warn("无法获取MTP剪枝数据:", error);
+        }
+    }
+
+    // 触发MTP剪枝和合并算法
+    async function triggerMTPPruningAndMerging() {
+        if (!staticExperimentPaths || staticExperimentPaths.length === 0) {
+            console.warn("没有源-目标对，跳过剪枝");
+            return;
+        }
+
+        try {
+            // 提取所有目的节点
+            const destinations = staticExperimentPaths.map(path => path.destination);
+            
+            console.log('🚀 触发MTP剪枝算法，目标节点:', destinations);
+            console.log('🚀 源-目标对数据:', staticExperimentPaths);
+            
+            const result = await apiCall('simulation/trigger-mtp-pruning', 'POST', {
+                destinations: destinations,
+                source_dest_pairs: staticExperimentPaths
+            });
+            
+            if (result && result.ok) {
+                console.log('✅ MTP剪枝和合并算法执行完成:', result.data);
+            } else {
+                console.error('❌ MTP剪枝执行失败:', result.data?.error);
+                console.error('❌ 完整响应:', result);
+            }
+        } catch (error) {
+            console.error("❌ 触发MTP剪枝失败:", error);
+        }
     }
 
     function updateUAVMap(uavs) { uavMap.clear(); if(uavs) uavs.forEach(uav => uavMap.set(uav.id, uav)); }
@@ -202,6 +646,24 @@ document.addEventListener('DOMContentLoaded', () => {
     
     async function initializeApp() {
         displayMessage("正在连接到后端...", false);
+        
+        // 获取配置信息以确定协议类型
+        try {
+            const configResult = await apiCall('simulation/config');
+            if (configResult && configResult.ok && configResult.data) {
+                currentProtocol = configResult.data.protocol || 'UNKNOWN';
+                console.log(`检测到协议类型: ${currentProtocol}`);
+            }
+        } catch (error) {
+            console.warn("无法获取协议配置，使用默认值", error);
+            currentProtocol = 'MTP'; // 默认假设是MTP
+        }
+        
+        // 如果是MTP协议，获取剪枝数据
+        if (currentProtocol === 'MTP') {
+            await fetchMTPPruningData();
+        }
+        
         const result = await apiCall('simulation/state');
         if (result && result.ok && result.data) {
             updateUIFromState(result.data);
@@ -214,11 +676,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
     async function startSimulation() {
         displayMessage("正在启动仿真...", false);
+        
+        // 清除MTP剪枝数据和相关状态
+        mtpPruningData = null;
+        console.log('🧹 开始/重置: 清除MTP剪枝数据');
+        
         const result = await apiCall('simulation/start', 'POST', { num_uavs: parseInt(numUAVsInput.value) });
         if (result && result.ok && result.data) {
             updateUIFromState(result.data.current_state);
             displayMessage(result.data.status_message, false);
             clearAllPathDisplays();
+            
+            // 重置后不获取剪枝数据，因为还没有源-目标对
+            console.log('✅ 仿真重置完成，MTP剪枝数据已清除');
         } else {
             displayMessage(result.data?.error || "启动失败。", true);
         }
@@ -291,6 +761,11 @@ document.addEventListener('DOMContentLoaded', () => {
         staticExperimentPaths = [];
         allExperimentRoundsData = [];
         previousExperimentStatus = null; 
+        
+        // 清除MTP剪枝数据
+        mtpPruningData = null;
+        console.log('🧹 clearAllPathDisplays: 清除MTP剪枝数据');
+        
         if(experimentPathsDisplay) experimentPathsDisplay.innerHTML = '';
         if(visualizationContainer) visualizationContainer.style.display = 'none';
         startExperimentButton.disabled = true;
@@ -533,7 +1008,27 @@ document.addEventListener('DOMContentLoaded', () => {
             window.staticExperimentPaths = JSON.parse(JSON.stringify(result.data.pairs));
             staticExperimentPaths = window.staticExperimentPaths;
             displayMessage(result.data.message, false);
-            await refreshFullStateAndRedraw();
+            
+            // 如果是MTP协议，立即执行剪枝和合并算法
+            if (currentProtocol === 'MTP') {
+                displayMessage("正在执行MTP剪枝和合并算法...", false);
+                
+                // 按顺序执行：剪枝 -> 获取数据 -> 刷新状态 -> 强制重绘
+                await triggerMTPPruningAndMerging();
+                await fetchMTPPruningData();
+                await refreshFullStateAndRedraw();
+                
+                // 强制重绘两个canvas
+                redrawCanvas();
+                
+                // 确保UI反馈
+                console.log('🎨 MTP剪枝完成，强制重绘canvas');
+                displayMessage("MTP剪枝和合并完成，对照组已更新", false);
+            } else {
+                // 非MTP协议，只需刷新状态
+                await refreshFullStateAndRedraw();
+            }
+            
             renderExperimentPaths([{ round: "初始", paths: staticExperimentPaths }]);
             startExperimentButton.disabled = false;
         } else {

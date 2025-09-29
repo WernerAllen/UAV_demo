@@ -22,7 +22,21 @@
         <div class="content-wrapper">
             <!-- 左侧区域：仿真地图和日志 -->
             <main class="simulation-area">
-                <canvas id="simulationCanvas" width="600" height="600"></canvas>
+                <!-- MTP协议双canvas显示区域 -->
+                <div id="canvasContainer" class="canvas-container">
+                    <div class="canvas-panel">
+                        <div class="canvas-header">
+                            <h3>原始网络拓扑</h3>
+                        </div>
+                        <canvas id="simulationCanvas" width="600" height="600"></canvas>
+                    </div>
+                    <div id="mtpCanvasPanel" class="canvas-panel mtp-panel">
+                        <div class="canvas-header">
+                            <h3>MTP协议剪枝对照组</h3>
+                        </div>
+                        <canvas id="mtpCanvas" width="600" height="600"></canvas>
+                    </div>
+                </div>
                 <div id="macLogSection" class="log-box">
                     <div class="box-header">
                         <h2>MAC层传输日志</h2>

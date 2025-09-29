@@ -286,6 +286,13 @@ class MTPRoutingModel:
         self.last_etx_to_root = {}
         self.tree_ready = False
         
+        # ## **** 重要：清除椭圆区域数据 **** ##
+        self.ellipse_regions.clear()
+        self.pruned_nodes.clear()
+        self.pruning_statistics.clear()
+        self.total_pruning_operations = 0
+        print("🧹 MTP: 清除椭圆区域和剪枝数据")
+        
         # 清除所有计算缓存
         if hasattr(self, '_neighbors_cache'):
             self._neighbors_cache.clear()
@@ -332,6 +339,10 @@ class MTPRoutingModel:
         
         # 论文MTP增强：路径合并机制
         self.root_groups = self._group_roots_by_distance(destination_ids)
+        
+        # 注意：这里不记录椭圆区域，等待后续调用record_actual_source_dest_pairs来记录
+        # 避免重复记录导致椭圆数量与路径不匹配
+        
         for group in self.root_groups:
             # 以第一个目标为主树根
             root_id = group[0]
@@ -354,6 +365,35 @@ class MTPRoutingModel:
                     other_tree = self._build_tree_for_root(other_id)
                 tree = self._merge_tree(tree, other_tree)
             self.virtual_trees[root_id] = tree
+        
+        print(f"🌳 MTP: 构建完成，共{len(self.root_groups)}个根组，椭圆区域数量: {len(self.ellipse_regions)}")
+
+    def record_actual_source_dest_pairs(self, source_dest_pairs):
+        """记录实际的源-目标对的椭圆区域信息"""
+        print(f"🎯 MTP: 记录实际源-目标对的椭圆区域，共{len(source_dest_pairs)}对")
+        
+        # 清除之前的椭圆区域记录
+        self.ellipse_regions.clear()
+        
+        for pair in source_dest_pairs:
+            source_id = pair.get('source')
+            dest_id = pair.get('destination')
+            if source_id is not None and dest_id is not None:
+                self._record_ellipse_region(source_id, dest_id)
+
+    def _record_ellipse_region(self, source_id, dest_id):
+        """记录源-目标对的椭圆区域信息"""
+        source_uav = self.uav_map.get(source_id)
+        dest_uav = self.uav_map.get(dest_id)
+        
+        if source_uav and dest_uav:
+            ellipse_key = (source_id, dest_id)
+            self.ellipse_regions[ellipse_key] = {
+                'source': source_uav,
+                'destination': dest_uav,
+                'last_update': time.time()
+            }
+            print(f"🔍 MTP: 记录椭圆区域 {source_id}→{dest_id}")
 
     def _group_roots_by_distance(self, destination_ids):
         """将距离较近的目标节点分为一组，返回分组列表。"""
@@ -1084,6 +1124,8 @@ class MTPRoutingModel:
         为目标节点列表构建剪枝树（在树构建阶段执行）
         这是树剪枝机制的核心：在构建阶段就减少不必要的计算
         
+        注意：这个方法不记录椭圆区域，椭圆区域由record_actual_source_dest_pairs统一管理
+        
         Args:
             destination_list: 目标节点ID列表
             sim_time: 当前仿真时间
@@ -1160,18 +1202,6 @@ class MTPRoutingModel:
             overall_pruning_rate = (total_pruned_nodes / total_original_nodes) * 100
             print(f"🌳 MTP树构建剪枝完成: 总节点={total_original_nodes}, 剪枝节点={total_pruned_nodes}, 总剪枝率={overall_pruning_rate:.1f}%")
         
-        # 记录椭圆区域信息
-        for i, dest_id in enumerate(destination_list):
-            if i < len(source_nodes):
-                source_id = source_nodes[i]
-                ellipse_key = (source_id, dest_id)
-                source_uav = self.uav_map.get(source_id)
-                dest_uav = self.uav_map.get(dest_id)
-                if source_uav and dest_uav:
-                    self.ellipse_regions[ellipse_key] = {
-                        'source': source_uav,
-                        'destination': dest_uav,
-                        'last_update': sim_time
-                    }
+        # 注意：椭圆区域信息由record_actual_source_dest_pairs统一管理，这里不再重复记录
     
     # ## **** TREE PRUNING MODIFICATION END **** ## 
