@@ -133,12 +133,9 @@ def generate_pairs_endpoint():
         if not isinstance(pair_count, int) or pair_count <= 0:
             return jsonify({"error": "无效的源-目标对数量"}), 400
         
-        # 确保仿真已启动并有无人机，但不重新初始化位置
-        if not sim_manager.uavs:
-            sim_manager.start_simulation()
-        else:
-            # 仿真已启动，只生成对，不重新初始化位置
-            print("🔄 仿真已存在，保持当前UAV位置生成源-目标对")
+        # 每次生成源-目标对时都重新初始化UAV位置
+        print("🔄 重新随机分布UAV位置并生成源-目标对")
+        sim_manager.start_simulation()
 
         pairs_data, message = sim_manager.generate_random_pairs_and_paths(pair_count)
         if pairs_data:

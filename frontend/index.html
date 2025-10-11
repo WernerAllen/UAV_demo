@@ -30,6 +30,38 @@
                         </div>
                         <canvas id="simulationCanvas" width="600" height="600"></canvas>
                     </div>
+                    
+                    <!-- 中间图例区域 -->
+                    <div class="legend-panel">
+                        <div class="legend-title">MTP路径合并机制</div>
+                        <div class="legend-items">
+                            <div class="legend-item">
+                                <span class="legend-icon ellipse-icon"></span>
+                                <span>椭圆剪枝区域</span>
+                            </div>
+                            <div class="legend-item">
+                                <span class="legend-icon merge-icon">M</span>
+                                <span>路径合并组</span>
+                            </div>
+                            <div class="legend-item">
+                                <span class="legend-icon target-icon">T</span>
+                                <span>合并目标节点</span>
+                            </div>
+                            <div class="legend-item">
+                                <span class="legend-icon shared-icon">2</span>
+                                <span>共享中间节点</span>
+                            </div>
+                            <div class="legend-item">
+                                <span class="legend-line solid-line"></span>
+                                <span>实线=已合并</span>
+                            </div>
+                            <div class="legend-item">
+                                <span class="legend-line dashed-line"></span>
+                                <span>虚线=未合并</span>
+                            </div>
+                        </div>
+                    </div>
+                    
                     <div id="mtpCanvasPanel" class="canvas-panel mtp-panel">
                         <div class="canvas-header">
                             <h3>MTP协议剪枝对照组</h3>
