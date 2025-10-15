@@ -10,14 +10,21 @@ body {
 }
 
 .main-wrapper {
-    min-width: 1520px; /* 最小宽度：两个canvas(600x2) + 图例(160) + 控制面板(350) + 间距(3x25) + 内边距(25x2) = 1585px，设为1520确保布局 */
-    width: max-content; /* 内容宽度 */
-    max-width: none; /* 移除最大宽度限制 */
+    min-width: 600px; /* 基础最小宽度 */
+    width: 95%; /* 响应式宽度 */
+    max-width: 1900px; /* 最大宽度 */
     background-color: #fff;
     border-radius: 8px;
     box-shadow: 0 4px 12px rgba(0,0,0,0.1);
     padding: 25px;
     margin: 20px auto; /* 水平居中，上下间距 */
+}
+
+/* MTP模式：固定布局 */
+body.mtp-mode .main-wrapper {
+    min-width: 1520px;
+    width: max-content;
+    max-width: none;
 }
 
 header {
@@ -43,10 +50,17 @@ header h1 {
 }
 
 .simulation-area {
-    flex: 0 1 auto; /* 不拉伸，允许收缩，自动宽度 */
+    flex: 1 1 auto; /* 可拉伸，允许收缩，自动宽度 */
     display: flex;
     flex-direction: column;
     min-width: 0; /* 允许子元素溢出 */
+    max-width: 1000px; /* 非MTP模式限制最大宽度，给控制面板更多空间 */
+}
+
+/* MTP模式：不拉伸，移除最大宽度限制 */
+body.mtp-mode .simulation-area {
+    flex: 0 1 auto;
+    max-width: none;
 }
 
 /* Canvas容器样式 */
@@ -61,8 +75,16 @@ header h1 {
 .canvas-panel {
     display: flex;
     flex-direction: column;
-    width: 600px; /* 固定宽度，不再使用flex */
-    flex-shrink: 0; /* 防止被压缩 */
+    flex: 1 1 auto; /* 默认可拉伸（非MTP模式） */
+    min-width: 300px; /* 最小宽度 */
+    max-width: 600px; /* 非MTP模式最大600px */
+}
+
+/* MTP模式：固定宽度 */
+body.mtp-mode .canvas-panel {
+    width: 600px;
+    flex: 0 0 600px;
+    flex-shrink: 0;
 }
 
 .canvas-header {
@@ -72,8 +94,13 @@ header h1 {
     border: 1px solid #ddd;
     border-bottom: none;
     border-radius: 4px 4px 0 0;
-    width: 600px; /* 固定宽度，与canvas一致 */
+    width: 100%; /* 默认占满父容器 */
     box-sizing: border-box;
+}
+
+/* MTP模式：固定宽度 */
+body.mtp-mode .canvas-header {
+    width: 600px;
 }
 
 .canvas-header h3 {
@@ -190,11 +217,20 @@ header h1 {
 }
 
 #simulationCanvas, #mtpCanvas {
-    width: 600px; /* 固定宽度 */
-    height: 600px; /* 固定高度 */
+    width: 100%; /* 默认占满父容器 */
+    height: auto; /* 高度自适应 */
+    aspect-ratio: 1 / 1; /* 保持1:1比例 */
     background-color: #fdfdfd;
     border: 1px solid #ccc;
     border-radius: 0 0 4px 4px;
+}
+
+/* MTP模式：固定尺寸 */
+body.mtp-mode #simulationCanvas,
+body.mtp-mode #mtpCanvas {
+    width: 600px;
+    height: 600px;
+    aspect-ratio: auto; /* 移除比例约束 */
 }
 
 #mtpCanvas {
@@ -202,17 +238,25 @@ header h1 {
     border-color: #81c784;
 }
 
-/* 当只显示单个canvas时的样式 */
+/* 单canvas模式样式 */
 .canvas-container.single-canvas {
-    justify-content: flex-start; /* 左对齐 */
+    justify-content: flex-start;
+    width: 100%; /* 占满可用空间 */
 }
 
 .canvas-container.single-canvas .canvas-panel {
+    flex: 1 1 auto; /* 可拉伸 */
+    max-width: 100%;
+}
+
+/* MTP模式下的单canvas样式覆盖 */
+body.mtp-mode .canvas-container.single-canvas .canvas-panel {
     width: 600px;
+    flex: 0 0 600px;
     flex-shrink: 0;
 }
 
-.canvas-container.single-canvas #simulationCanvas {
+body.mtp-mode .canvas-container.single-canvas #simulationCanvas {
     width: 600px;
     height: 600px;
 }
@@ -223,10 +267,16 @@ header h1 {
 }
 
 .controls-area {
-    flex: 0 0 350px; /* 固定宽度为350px，不拉伸不压缩 */
+    flex: 1 1 600px; /* 非MTP模式可拉伸，基础350px */
+    min-width: 600px; /* 最小宽度350px */
     display: flex;
     flex-direction: column;
     gap: 20px;
+}
+
+/* MTP模式：固定宽度 */
+body.mtp-mode .controls-area {
+    flex: 0 0 350px;
 }
 
 .box-header h2, .box-header h3 {
@@ -295,11 +345,18 @@ header h1 {
 
 .log-box {
     width: 100%;
+    max-width: 1000px; /* 限制日志区域最大宽度 */
+}
+
+/* MTP模式：与Canvas容器宽度保持一致 */
+body.mtp-mode .log-box {
+    max-width: 1390px; /* 双canvas(600x2) + 图例(160) + 间距(30) = 1390px */
 }
 
 #macLogContainer {
     height: 400px;
     overflow-y: auto;
+    overflow-x: auto; /* 添加横向滚动，防止内容溢出 */
     background-color: #263238;
     color: #eceff1;
     border: 1px solid #ddd;

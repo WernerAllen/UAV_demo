@@ -52,7 +52,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let staticExperimentPaths = [];
     let allExperimentRoundsData = [];
     let previousExperimentStatus = null; 
-    let currentProtocol = null; // 当前使用的协议
+    let currentProtocol = 'MTP'; // 当前使用的协议，默认MTP避免刷新时布局闪烁
     let mtpPruningData = null; // MTP协议剪枝数据 
 
     // --- 核心功能 ---
@@ -112,7 +112,19 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function redrawCanvas() {
         if (!ctx) return;
+        
+        // 保存当前状态
+        ctx.save();
+        
+        // 清除canvas
         ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        // 应用缩放变换（非MTP模式）
+        if (currentProtocol !== 'MTP') {
+            const scale = getScale(canvas);
+            ctx.scale(scale, scale);
+        }
+        
         // 只有当currentGridConfig存在时才绘制网格背景（PTP协议）
         if (currentGridConfig) drawGridBackground(ctx);
         if (currentUAVs) currentUAVs.forEach(uav => drawUAV(ctx, uav));
@@ -127,6 +139,9 @@ document.addEventListener('DOMContentLoaded', () => {
             if (holderUAV) drawPacket(ctx, holderUAV, packet);
         });
         
+        // 恢复状态
+        ctx.restore();
+        
         // 如果是MTP协议，同时更新MTP对照组canvas
         if (currentProtocol === 'MTP' && mtpCtx) {
             redrawMTPCanvas();
@@ -138,15 +153,55 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!canvasContainer || !mtpCanvasPanel) return;
         
         if (currentProtocol === 'MTP') {
-            // 显示双canvas布局
+            // MTP模式：显示双canvas布局，添加mtp-mode类
+            document.body.classList.add('mtp-mode');
             canvasContainer.classList.remove('single-canvas');
             mtpCanvasPanel.style.display = 'flex';
+            // MTP模式：固定尺寸600x600
+            setCanvasSize(canvas, 600, 600);
+            if (mtpCanvas) setCanvasSize(mtpCanvas, 600, 600);
         } else {
-            // 显示单canvas布局
+            // 其他协议：显示单canvas布局，移除mtp-mode类
+            document.body.classList.remove('mtp-mode');
             canvasContainer.classList.add('single-canvas');
             mtpCanvasPanel.style.display = 'none';
+            // 其他协议：动态尺寸，根据容器大小调整
+            updateCanvasSizeToContainer();
         }
     }
+
+    // 设置canvas的实际绘制尺寸
+    function setCanvasSize(canvasElement, width, height) {
+        if (!canvasElement) return;
+        canvasElement.width = width;
+        canvasElement.height = height;
+    }
+
+    // 根据容器大小更新canvas尺寸（非MTP模式）
+    function updateCanvasSizeToContainer() {
+        if (currentProtocol === 'MTP') return; // MTP模式不调整
+        
+        const canvasPanel = canvas.closest('.canvas-panel');
+        if (!canvasPanel) return;
+        
+        // 获取容器的实际宽度
+        const containerWidth = canvasPanel.clientWidth;
+        // 减去padding和border
+        const actualWidth = Math.max(300, containerWidth - 20); // 最小300px
+        const actualHeight = actualWidth; // 保持1:1比例
+        
+        setCanvasSize(canvas, actualWidth, actualHeight);
+        
+        // 重绘canvas内容
+        redrawCanvas();
+    }
+
+    // 监听窗口大小变化，动态调整canvas（仅非MTP模式）
+    window.addEventListener('resize', () => {
+        if (currentProtocol !== 'MTP') {
+            updateCanvasSizeToContainer();
+        }
+    });
 
     // MTP对照组canvas绘制函数
     function redrawMTPCanvas() {
@@ -217,6 +272,13 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         context.textAlign = 'start';
         context.textBaseline = 'alphabetic';
+    }
+
+    // 获取缩放比例（后端坐标基于600x600）
+    function getScale(canvasElement) {
+        if (!canvasElement) return 1;
+        if (currentProtocol === 'MTP') return 1; // MTP模式不缩放
+        return canvasElement.width / 600; // 基于600的缩放比例
     }
 
     function drawUAV(context, uav) {
@@ -957,6 +1019,9 @@ document.addEventListener('DOMContentLoaded', () => {
             currentProtocol = 'MTP'; // 默认假设是MTP
         }
         
+        // 立即应用协议对应的布局样式
+        updateCanvasDisplay();
+        
         // 如果是MTP协议，获取剪枝数据
         if (currentProtocol === 'MTP') {
             await fetchMTPPruningData();
@@ -1514,5 +1579,8 @@ document.addEventListener('DOMContentLoaded', () => {
     generatePairsButton.addEventListener('click', handleGeneratePairsClick);
     startExperimentButton.addEventListener('click', handleStartExperimentClick);
 
+    // 页面加载时立即应用默认协议的布局样式（避免刷新时布局闪烁）
+    updateCanvasDisplay();
+    
     initializeApp();
 });

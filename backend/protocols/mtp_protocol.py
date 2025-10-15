@@ -2,14 +2,9 @@
 # 描述: MTP 路由协议实现（拥塞感知多层树协议）
 
 import math
-import time  # 添加time模块导入，用于记录时间
-import random  # 添加random模块导入，用于PRR计算
-try:
-    import numpy as np
-except ImportError:
-    # 如果没有numpy，使用math模块替代
-    np = None
-from functools import lru_cache  # 添加lru_cache用于缓存计算结果
+import time
+import random
+from functools import lru_cache
 from simulation_config import *
 from core.uav import UAV
 
@@ -580,73 +575,9 @@ class MTPRoutingModel:
         
         return best_parent_id
     
-    def _get_path_to_root(self, tree, node_id):
-        """
-        获取从节点到根的路径（用于日志显示）
-        
-        Args:
-            tree: 树结构
-            node_id: 起始节点ID
-            
-        Returns:
-            path_str: 路径字符串
-        """
-        path = [node_id]
-        current = node_id
-        
-        while tree.get(current) is not None:
-            current = tree[current]
-            path.append(current)
-            if len(path) > 100:  # 防止环路
-                break
-        
-        return '→'.join(map(str, path))
-    
     def _print_tree_statistics(self, root_id, tree, target_group):
-        """
-        打印树的统计信息（已禁用以提高性能）
-        
-        Args:
-            root_id: 根节点ID
-            tree: 树结构
-            target_group: 目标节点列表
-        """
-        # 已禁用详细输出以提高运行效率
+        """打印树的统计信息（已禁用以提高性能）"""
         pass
-        # total_nodes = len(tree)
-        # target_count = len(target_group)
-        # 
-        # # 计算平均跳数
-        # avg_hops = 0
-        # max_hops = 0
-        # for target_id in target_group:
-        #     hops = 0
-        #     current = target_id
-        #     while tree.get(current) is not None:
-        #         hops += 1
-        #         current = tree[current]
-        #         if hops > 100:  # 防止环路
-        #             break
-        #     avg_hops += hops
-        #     max_hops = max(max_hops, hops)
-        # avg_hops = avg_hops / target_count if target_count > 0 else 0
-        # 
-        # # 计算总ETX
-        # total_etx = 0
-        # for node_id, parent_id in tree.items():
-        #     if parent_id is not None:
-        #         node = self.uav_map.get(node_id)
-        #         parent = self.uav_map.get(parent_id)
-        #         if node and parent:
-        #             total_etx += self.get_link_base_delay(node, parent)
-        # avg_etx = total_etx / total_nodes if total_nodes > 0 else 0
-        # 
-        # print(f"    📊 树统计 [根: UAV-{root_id}]:")
-        # print(f"      ├─ 总节点数: {total_nodes}")
-        # print(f"      ├─ 目标节点: {target_count}")
-        # print(f"      ├─ 平均跳数: {avg_hops:.2f}")
-        # print(f"      ├─ 最大跳数: {max_hops}")
-        # print(f"      └─ 平均ETX: {avg_etx:.3f}")
     
     def _merge_tree(self, tree1, tree2):
         """
@@ -862,12 +793,15 @@ class MTPRoutingModel:
             # 计算完成后移除当前节点标记，允许其他路径重用此节点
             visited_nodes.remove(uav1.id)
             
-            # 限制缓存大小
-            if len(self._etx_to_root_cache) > 2000:  # 允许更大的缓存，因为这个函数递归调用多
-                self._etx_to_root_cache.clear()
-                
-            # 缓存结果
+            # 缓存结果（自动LRU管理）
             self._etx_to_root_cache[cache_key] = min_etx
+            
+            # 限制缓存大小
+            if len(self._etx_to_root_cache) > 1000:
+                # 删除最旧的一半缓存
+                keys_to_remove = list(self._etx_to_root_cache.keys())[:500]
+                for key in keys_to_remove:
+                    del self._etx_to_root_cache[key]
             
             return min_etx
         else:
@@ -919,12 +853,15 @@ class MTPRoutingModel:
             # 超出范围返回0
             prr = 0
         
-        # 限制缓存大小
-        if len(self._prr_cache) > 1000:
-            self._prr_cache.clear()
-        
         # 存储结果
         self._prr_cache[dist_key] = prr
+        
+        # 限制缓存大小
+        if len(self._prr_cache) > 500:
+            # 删除最旧的一半缓存
+            keys_to_remove = list(self._prr_cache.keys())[:250]
+            for key in keys_to_remove:
+                del self._prr_cache[key]
         
         return prr
 
@@ -949,10 +886,15 @@ class MTPRoutingModel:
         # 初始化缓存（如果需要）并存储结果
         if not hasattr(self, '_neighbors_cache'):
             self._neighbors_cache = {}
-        # 限制缓存大小
-        if len(self._neighbors_cache) > 1000:
-            self._neighbors_cache.clear()  # 防止内存泄漏，定期清空
+        
         self._neighbors_cache[cache_key] = neighbors
+        
+        # 限制缓存大小
+        if len(self._neighbors_cache) > 500:
+            # 删除最旧的一半缓存
+            keys_to_remove = list(self._neighbors_cache.keys())[:250]
+            for key in keys_to_remove:
+                del self._neighbors_cache[key]
         
         return neighbors
 

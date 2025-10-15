@@ -5,14 +5,9 @@ from .mtp_protocol import MTPRoutingModel
 from .ptp_protocol import PTPRoutingModel
 import time
 import math
-import random  # 添加random模块导入，用于PRR计算
-try:
-    import numpy as np  # 添加numpy模块导入，用于向量计算
-except ImportError:
-    # 如果没有numpy，使用math模块替代
-    np = None
+import random
 from simulation_config import UAV_COMMUNICATION_RANGE, TREE_PRUNING_ENABLED, PRUNING_UPDATE_INTERVAL
-from functools import lru_cache  # 添加lru_cache用于缓存计算结果
+from functools import lru_cache
 
 class DHyTPRoutingModel:
     """
