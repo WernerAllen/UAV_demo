@@ -294,21 +294,46 @@ def get_mtp_pruning_data_endpoint():
                         "focal_distance": focal_distance
                     })
             
-            # 获取合并目标数据
+            # 获取合并目标数据和虚拟根节点信息
             if hasattr(routing_model, 'root_groups') and routing_model.root_groups:
-                for group in routing_model.root_groups:
+                # 同时获取虚拟根节点信息
+                virtual_roots_info = []
+                
+                for group_idx, group in enumerate(routing_model.root_groups):
                     if len(group) > 1:
+                        # 计算虚拟根节点（与MTP协议中的逻辑一致）
+                        center_x = sum(sim_manager.mac_layer.uav_map[id].x for id in group) / len(group)
+                        center_y = sum(sim_manager.mac_layer.uav_map[id].y for id in group) / len(group)
+                        center_z = sum(sim_manager.mac_layer.uav_map[id].z for id in group) / len(group)
+                        
+                        min_dist = float('inf')
+                        virtual_root_id = group[0]
+                        
+                        for uav_id in group:
+                            uav = sim_manager.mac_layer.uav_map[uav_id]
+                            dist = (uav.x - center_x)**2 + (uav.y - center_y)**2 + (uav.z - center_z)**2
+                            if dist < min_dist:
+                                min_dist = dist
+                                virtual_root_id = uav_id
+                        
+                        # 记录虚拟根节点信息
+                        virtual_roots_info.append({
+                            "group_index": group_idx,
+                            "virtual_root_id": virtual_root_id,
+                            "group_nodes": group
+                        })
+                        
                         # 所有组内节点都是合并目标（包括主根）
-                        main_root = group[0]
                         for target_node in group:
                             pruning_data["merge_targets"].append({
                                 "uav_id": target_node,
-                                "main_root_id": main_root,
+                                "main_root_id": virtual_root_id,
                                 "group_size": len(group),
-                                "is_main_root": (target_node == main_root)
+                                "is_main_root": (target_node == virtual_root_id)
                             })
                 
                 pruning_data["tree_groups"] = routing_model.root_groups
+                pruning_data["virtual_roots"] = virtual_roots_info
         
     return jsonify(pruning_data)
 

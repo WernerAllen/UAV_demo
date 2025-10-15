@@ -214,32 +214,12 @@ document.addEventListener('DOMContentLoaded', () => {
             currentUAVs.forEach(uav => drawUAV(mtpCtx, uav));
         }
         
-        // 只有在有MTP剪枝数据时才绘制椭圆和标记
-        if (mtpPruningData) {
-            // 绘制剪枝椭圆区域
-            if (mtpPruningData.ellipses && mtpPruningData.ellipses.length > 0) {
-                const pathCount = staticExperimentPaths ? staticExperimentPaths.length : 0;
-                console.log(`🔍 数据检查: 椭圆数量=${mtpPruningData.ellipses.length}, 路径数量=${pathCount}`);
-                
-                if (mtpPruningData.ellipses.length !== pathCount && pathCount > 0) {
-                    console.warn(`⚠️ 椭圆数量与路径数量不匹配！椭圆:${mtpPruningData.ellipses.length} vs 路径:${pathCount}`);
-                }
-                
-                mtpPruningData.ellipses.forEach((ellipse, index) => {
-                    console.log(`🎨 绘制椭圆${index + 1}: ${ellipse.source_id}→${ellipse.dest_id}`);
-                    drawPruningEllipse(mtpCtx, ellipse);
-                });
-            }
-            
-            // 标注合并的目的节点
-            if (mtpPruningData.merge_targets && mtpPruningData.merge_targets.length > 0) {
-                console.log(`🎯 标注${mtpPruningData.merge_targets.length}个合并目标`);
-                mtpPruningData.merge_targets.forEach(target => {
-                    highlightMergeTarget(mtpCtx, target);
-                });
-            }
-        } else {
-            console.log('🚫 没有MTP剪枝数据，只显示UAV节点');
+        // 只有在有MTP剪枝数据时才绘制椭圆区域
+        if (mtpPruningData && mtpPruningData.ellipses && mtpPruningData.ellipses.length > 0) {
+            mtpPruningData.ellipses.forEach((ellipse, index) => {
+                console.log(`🎨 绘制椭圆${index + 1}: ${ellipse.source_id}→${ellipse.dest_id}`);
+                drawPruningEllipse(mtpCtx, ellipse);
+            });
         }
         
         // 如果有当前路径，也在MTP canvas上显示
@@ -322,288 +302,156 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // 完整版本：MTP对照组用，显示虚线/实线对比和合并标记
+    // 完整版本：MTP对照组用，基于后端真实合并数据显示
     function drawMultiplePaths(context, pathsData) {
         const colors = ['#FF4136', '#0074D9', '#2ECC40', '#FFDC00', '#B10DC9', '#FF851B', '#7FDBFF', '#3D9970'];
         
-        // 识别合并的路径组
-        const mergeGroups = identifyMergedPaths(pathsData);
+        // 调试：显示所有路径的目标节点
+        console.log('📍 所有路径的目标节点:', pathsData.map(p => p.destination));
         
-        // 输出合并信息到控制台
-        const mergedGroupCount = mergeGroups.filter(g => g.indices.length > 1).length;
-        if (mergedGroupCount > 0) {
-            console.log(`🔀 检测到${mergedGroupCount}个合并路径组：`);
-            mergeGroups.forEach((group, idx) => {
-                if (group.indices.length > 1) {
-                    console.log(`  组${idx + 1}: ${group.indices.length}条路径合并 → 目标节点: [${group.destinations.join(', ')}]`);
+        // 获取合并组中的目标节点集合
+        const mergedDestinations = new Set();
+        const mergedGroups = [];
+        if (mtpPruningData && mtpPruningData.tree_groups) {
+            console.log('📦 后端返回的所有分组:', mtpPruningData.tree_groups);
+            
+            mtpPruningData.tree_groups.forEach((group, idx) => {
+                if (group.length > 1) {
+                    mergedGroups.push(group);
+                    group.forEach(nodeId => mergedDestinations.add(nodeId));
+                    console.log(`  合并组${idx}: [${group.join(', ')}] (${group.length}个节点)`);
+                } else {
+                    console.log(`  单节点组${idx}: [${group[0]}]`);
                 }
             });
+            console.log('🔍 合并组节点集合:', Array.from(mergedDestinations));
         }
         
-        // 识别并高亮共享节点
-        const sharedNodes = findSharedNodes(pathsData, mergeGroups);
+        // 检查哪些合并组节点有路径，哪些没有
+        const destinationsSet = new Set(pathsData.map(p => p.destination));
+        const missingNodes = Array.from(mergedDestinations).filter(nodeId => !destinationsSet.has(nodeId));
+        if (missingNodes.length > 0) {
+            console.warn('⚠️ 以下合并组节点没有对应的路径:', missingNodes);
+        }
         
         // 绘制所有路径
+        let mergedCount = 0;
         pathsData.forEach((pathInfo, index) => {
             const color = colors[index % colors.length];
             if (pathInfo.path) {
-                // 检查这条路径是否属于合并组
-                const groupInfo = mergeGroups.find(g => g.indices.includes(index));
-                const isMerged = groupInfo && groupInfo.indices.length > 1;
+                // 检查路径的目标节点是否在合并组中
+                const isMergedPath = mergedDestinations.has(pathInfo.destination);
                 
-                // 计算在合并组中的索引（用于显示编号）
-                let mergeIndex = -1;
-                if (isMerged && groupInfo) {
-                    mergeIndex = groupInfo.indices.indexOf(index);
+                if (isMergedPath) {
+                    // 合并组相关路径：粗虚线
+                    mergedCount++;
+                    console.log(`✅ 路径${index}: 源${pathInfo.source}→目标${pathInfo.destination} (合并组路径)`);
+                    drawPathThickSolid(context, pathInfo.path, color);
+                } else {
+                    // 普通路径：细虚线
+                    drawPath(context, pathInfo.path, color, false, false, null);
                 }
-                
-                drawPath(context, pathInfo.path, color, isMerged, groupInfo, mergeIndex);
             }
         });
         
-        // 绘制共享节点的特殊标记
-        drawSharedNodes(context, sharedNodes, mergeGroups);
+        console.log(`📊 总路径数: ${pathsData.length}, 合并组路径: ${mergedCount}, 合并组节点: ${mergedDestinations.size}`);
         
-        // 最后绘制合并组的标注
-        drawMergeConnections(context, pathsData, mergeGroups, colors);
+        // 如果有后端返回的合并组数据，绘制虚拟根节点
+        if (mtpPruningData && mtpPruningData.tree_groups) {
+            drawVirtualRootMarkersFromBackend(context, mtpPruningData.tree_groups);
+        }
     }
     
-    // 找到合并路径中的共享节点
-    function findSharedNodes(pathsData, mergeGroups) {
-        const sharedNodesMap = new Map(); // {nodeId: {count: 2, groupIdx: 0, pathIndices: [0, 1]}}
+    // 绘制粗虚线路径（用于合并组相关路径）
+    function drawPathThickSolid(context, pathNodeIds, color) {
+        if (!pathNodeIds || pathNodeIds.length < 2) return;
         
-        mergeGroups.forEach((group, groupIdx) => {
-            if (group.indices.length <= 1) return; // 只处理有合并的组
-            
-            const nodeCounts = new Map(); // 统计每个节点在组内出现的次数
-            
-            // 收集组内所有路径的节点
-            group.indices.forEach(pathIdx => {
-                const pathInfo = pathsData[pathIdx];
-                if (pathInfo && pathInfo.path) {
-                    pathInfo.path.forEach(nodeId => {
-                        if (!nodeCounts.has(nodeId)) {
-                            nodeCounts.set(nodeId, { count: 0, pathIndices: [] });
-                        }
-                        const info = nodeCounts.get(nodeId);
-                        info.count++;
-                        if (!info.pathIndices.includes(pathIdx)) {
-                            info.pathIndices.push(pathIdx);
-                        }
-                    });
-                }
-            });
-            
-            // 找出共享节点（在至少2条路径中出现）
-            nodeCounts.forEach((info, nodeId) => {
-                if (info.count >= 2) {
-                    sharedNodesMap.set(nodeId, {
-                        count: info.count,
-                        groupIdx: groupIdx,
-                        pathIndices: info.pathIndices
-                    });
-                }
-            });
-        });
+        context.save();
+        context.setLineDash([10, 6]); // 虚线
+        const lineWidth = 4; // 粗线
+        const arrowSize = 12;
         
-        return sharedNodesMap;
+        for (let i = 0; i < pathNodeIds.length - 1; i++) {
+            const uav1 = uavMap.get(pathNodeIds[i]);
+            const uav2 = uavMap.get(pathNodeIds[i+1]);
+            if (uav1 && uav2) {
+                drawArrow(context, uav1.x, uav1.y, uav2.x, uav2.y, arrowSize, color, lineWidth);
+            }
+        }
+        
+        context.restore();
     }
     
-    // 绘制共享节点的特殊标记
-    function drawSharedNodes(context, sharedNodesMap, mergeGroups) {
-        if (sharedNodesMap.size === 0) return;
+    function drawVirtualRootMarkersFromBackend(context, treeGroups) {
+        // 基于后端返回的virtual_roots信息绘制虚拟根节点
+        if (!mtpPruningData || !mtpPruningData.virtual_roots) {
+            return;
+        }
         
-        console.log(`🔗 检测到${sharedNodesMap.size}个共享节点`);
-        
-        sharedNodesMap.forEach((info, nodeId) => {
-            const uav = uavMap.get(nodeId);
-            if (!uav) return;
+        mtpPruningData.virtual_roots.forEach((rootInfo) => {
+            const group = rootInfo.group_nodes;
+            if (group.length <= 1) return;
             
-            context.save();
+            // 获取虚拟根节点的位置（后端选择的实际节点）
+            const virtualRootUav = uavMap.get(rootInfo.virtual_root_id);
+            if (!virtualRootUav) return;
             
-            // 绘制多层同心圆表示共享
-            // 外层：淡绿色光晕
-            context.fillStyle = 'rgba(76, 175, 80, 0.2)';
-            context.beginPath();
-            context.arc(uav.x, uav.y, 18, 0, Math.PI * 2);
-            context.fill();
+            const virtualRootX = virtualRootUav.x;
+            const virtualRootY = virtualRootUav.y;
             
-            // 中层：绿色环
-            context.strokeStyle = 'rgba(76, 175, 80, 0.8)';
-            context.lineWidth = 3;
-            context.beginPath();
-            context.arc(uav.x, uav.y, 12, 0, Math.PI * 2);
-            context.stroke();
-            
-            // 内层：深绿色小圆
-            context.fillStyle = 'rgba(56, 142, 60, 0.9)';
-            context.beginPath();
-            context.arc(uav.x, uav.y, 8, 0, Math.PI * 2);
-            context.fill();
-            
-            // 白色边框
-            context.strokeStyle = 'white';
-            context.lineWidth = 2;
-            context.stroke();
-            
-            // 绘制共享数量
-            context.fillStyle = 'white';
-            context.font = 'bold 9px Arial';
-            context.textAlign = 'center';
-            context.textBaseline = 'middle';
-            context.fillText(info.count, uav.x, uav.y);
-            
-            // 在节点上方显示"共享"标签
-            context.fillStyle = 'rgba(76, 175, 80, 0.95)';
-            context.beginPath();
-            context.roundRect(uav.x - 20, uav.y - 28, 40, 16, 3);
-            context.fill();
-            
-            context.strokeStyle = 'white';
-            context.lineWidth = 1.5;
-            context.stroke();
-            
-            context.fillStyle = 'white';
-            context.font = 'bold 10px Arial';
-            context.fillText('共享', uav.x, uav.y - 20);
-            
-            context.restore();
-        });
-    }
-    
-    // 已移除光晕效果函数，改用实线/虚线对比
-    
-    function identifyMergedPaths(pathsData) {
-        // 根据目标节点距离识别合并组
-        const mergeGroups = [];
-        const used = new Set();
-        const MERGE_THRESHOLD = 30; // 与后端保持一致
-        
-        pathsData.forEach((pathInfo1, i) => {
-            if (used.has(i)) return;
-            
-            const dest1 = pathInfo1.destination;
-            const uav1 = uavMap.get(dest1);
-            if (!uav1) return;
-            
-            const group = { indices: [i], destinations: [dest1] };
-            
-            pathsData.forEach((pathInfo2, j) => {
-                if (i === j || used.has(j)) return;
-                
-                const dest2 = pathInfo2.destination;
-                const uav2 = uavMap.get(dest2);
-                if (!uav2) return;
-                
-                // 计算3D距离
-                const dist = Math.sqrt(
-                    Math.pow(uav1.x - uav2.x, 2) + 
-                    Math.pow(uav1.y - uav2.y, 2) + 
-                    Math.pow((uav1.z || 0) - (uav2.z || 0), 2)
-                );
-                
-                if (dist < MERGE_THRESHOLD) {
-                    group.indices.push(j);
-                    group.destinations.push(dest2);
-                    used.add(j);
-                }
-            });
-            
-            used.add(i);
-            mergeGroups.push(group);
-        });
-        
-        return mergeGroups;
-    }
-    
-    function drawMergeConnections(context, pathsData, mergeGroups, colors) {
-        // 为有合并的组绘制简洁的连接标记
-        mergeGroups.forEach((group, groupIdx) => {
-            if (group.indices.length <= 1) return; // 单路径组不需要标记
-            
-            // 获取合并组中所有目标节点的位置
-            const destPositions = group.destinations.map(destId => {
-                const uav = uavMap.get(destId);
-                return uav ? { x: uav.x, y: uav.y, id: destId } : null;
+            // 获取组内所有节点的位置（用于绘制连接线）
+            const nodePositions = group.map(nodeId => {
+                const uav = uavMap.get(nodeId);
+                return uav ? { x: uav.x, y: uav.y, id: nodeId } : null;
             }).filter(pos => pos !== null);
             
-            if (destPositions.length < 2) return;
+            if (nodePositions.length < 2) return;
             
             context.save();
             
-            // 计算目标节点的中心点
-            const destCenterX = destPositions.reduce((sum, pos) => sum + pos.x, 0) / destPositions.length;
-            const destCenterY = destPositions.reduce((sum, pos) => sum + pos.y, 0) / destPositions.length;
+            // 绘制从虚拟根到各节点的虚线连接
+            context.setLineDash([5, 5]);
+            context.strokeStyle = 'rgba(138, 43, 226, 0.4)';
+            context.lineWidth = 1.5;
             
-            // 绘制目标节点之间的连接线
-            context.setLineDash([4, 4]);
-            context.strokeStyle = 'rgba(138, 43, 226, 0.5)';
-            context.lineWidth = 2;
-            
-            destPositions.forEach(pos => {
+            nodePositions.forEach(pos => {
                 context.beginPath();
-                context.moveTo(destCenterX, destCenterY);
+                context.moveTo(virtualRootX, virtualRootY);
                 context.lineTo(pos.x, pos.y);
                 context.stroke();
             });
             
-            // 在目标节点中心绘制合并标记
+            // 绘制虚拟根节点标记
             context.setLineDash([]);
             
             // 外圈光晕
-            context.fillStyle = 'rgba(138, 43, 226, 0.2)';
+            context.fillStyle = 'rgba(255, 87, 34, 0.2)';
             context.beginPath();
-            context.arc(destCenterX, destCenterY, 15, 0, Math.PI * 2);
+            context.arc(virtualRootX, virtualRootY, 6.5, 0, Math.PI * 2);
             context.fill();
             
-            // 中心圆
-            context.fillStyle = 'rgba(138, 43, 226, 0.95)';
+            // 中心大圆
+            context.fillStyle = 'rgba(255, 87, 34, 0.95)';
             context.beginPath();
-            context.arc(destCenterX, destCenterY, 10, 0, Math.PI * 2);
+            context.arc(virtualRootX, virtualRootY, 6, 0, Math.PI * 2);
             context.fill();
             
+            // 白色边框
             context.strokeStyle = 'white';
-            context.lineWidth = 2;
+            context.lineWidth = 1;
             context.stroke();
             
-            // 绘制"M"字标记
+            // 绘制"V"字标记
             context.fillStyle = 'white';
-            context.font = 'bold 12px Arial';
+            context.font = 'bold 6px Arial';
             context.textAlign = 'center';
             context.textBaseline = 'middle';
-            context.fillText('M', destCenterX, destCenterY);
-            
-            // 在合并中心上方显示合并数量和编号列表
-            const labelY = destCenterY - 30;
-            
-            // 创建路径编号列表文本
-            const pathNumbers = group.indices.map((idx, i) => `${i + 1}`).join(', ');
-            const labelText = `合并×${group.indices.length} [${pathNumbers}]`;
-            
-            // 测量文本宽度
-            context.font = 'bold 11px Arial';
-            const textWidth = context.measureText(labelText).width;
-            
-            // 绘制标签背景
-            context.fillStyle = 'rgba(138, 43, 226, 0.95)';
-            context.beginPath();
-            context.roundRect(destCenterX - textWidth/2 - 8, labelY - 10, textWidth + 16, 20, 4);
-            context.fill();
-            
-            // 绘制标签边框
-            context.strokeStyle = 'white';
-            context.lineWidth = 1.5;
-            context.stroke();
-            
-            // 绘制文字
-            context.fillStyle = 'white';
-            context.textAlign = 'center';
-            context.textBaseline = 'middle';
-            context.fillText(labelText, destCenterX, labelY);
+            context.fillText('V', virtualRootX, virtualRootY);
             
             context.restore();
         });
     }
+    
 
     // 简单版本：只绘制普通实线路径，无特殊标记
     function drawPathSimple(context, pathNodeIds, color) {
@@ -618,112 +466,57 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     
-    // 完整版本：支持虚线/实线对比和合并标记（按段判断）
-    function drawPath(context, pathNodeIds, color, isMerged = false, groupInfo = null, mergeIndex = -1) {
+    // 完整版本：对照组中所有路径默认虚线，合并路径特殊处理
+    function drawPath(context, pathNodeIds, color, isMerged = false, isPrimaryPath = false, groupInfo = null) {
         if (!pathNodeIds || pathNodeIds.length < 2) return;
         
         context.save();
         
-        // 非合并路径用虚线，合并路径按段判断
-        if (isMerged && groupInfo) {
-            // 合并路径：按段判断是否共享
-            // 收集所有合并组中其他路径的段
-            const sharedSegments = new Set();
-            
-            // 遍历合并组中的所有路径，找出共享的段
-            groupInfo.indices.forEach(pathIdx => {
-                const otherPathInfo = staticExperimentPaths[pathIdx];
-                if (otherPathInfo && otherPathInfo.path) {
-                    for (let i = 0; i < otherPathInfo.path.length - 1; i++) {
-                        const segmentKey = `${otherPathInfo.path[i]}-${otherPathInfo.path[i+1]}`;
-                        
-                        // 检查这个段是否在当前路径中也存在
-                        for (let j = 0; j < pathNodeIds.length - 1; j++) {
-                            const currentSegmentKey = `${pathNodeIds[j]}-${pathNodeIds[j+1]}`;
-                            if (segmentKey === currentSegmentKey) {
-                                // 需要至少在2条不同路径中出现才算共享
-                                // 检查这个段在多少条不同路径中出现
-                                let count = 0;
-                                groupInfo.indices.forEach(idx => {
-                                    const checkPath = staticExperimentPaths[idx];
-                                    if (checkPath && checkPath.path) {
-                                        for (let k = 0; k < checkPath.path.length - 1; k++) {
-                                            if (`${checkPath.path[k]}-${checkPath.path[k+1]}` === segmentKey) {
-                                                count++;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                });
-                                if (count >= 2) {
-                                    sharedSegments.add(segmentKey);
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-            
-            // 逐段绘制，根据是否共享决定实线或虚线（整体加粗）
-            for (let i = 0; i < pathNodeIds.length - 1; i++) {
-                const uav1 = uavMap.get(pathNodeIds[i]);
-                const uav2 = uavMap.get(pathNodeIds[i+1]);
-                if (uav1 && uav2) {
-                    const segmentKey = `${pathNodeIds[i]}-${pathNodeIds[i+1]}`;
-                    const isSharedSegment = sharedSegments.has(segmentKey);
-                    
-                    if (isSharedSegment) {
-                        // 共享段：实线，最粗
-                        context.setLineDash([]);
-                        const lineWidth = 4.5;
-                        const arrowSize = 13;
-                        drawArrow(context, uav1.x, uav1.y, uav2.x, uav2.y, arrowSize, color, lineWidth);
-                    } else {
-                        // 非共享段：虚线，但依然比非合并路径粗
-                        context.setLineDash([8, 4]);
-                        const lineWidth = 3.5;
-                        const arrowSize = 11;
-                        // 颜色不透明，保持清晰
+        if (isMerged) {
+            // 合并路径组
+            if (isPrimaryPath) {
+                // 主路径：使用实线，正常粗细
+                context.setLineDash([]);
+                const lineWidth = 3.5;
+                const arrowSize = 11;
+                
+                for (let i = 0; i < pathNodeIds.length - 1; i++) {
+                    const uav1 = uavMap.get(pathNodeIds[i]);
+                    const uav2 = uavMap.get(pathNodeIds[i+1]);
+                    if (uav1 && uav2) {
                         drawArrow(context, uav1.x, uav1.y, uav2.x, uav2.y, arrowSize, color, lineWidth);
                     }
                 }
-            }
-            
-            // 在起点和终点添加编号标记
-            if (mergeIndex >= 0 && pathNodeIds.length > 0) {
-                const sourceId = pathNodeIds[0];
-                const destId = pathNodeIds[pathNodeIds.length - 1];
-                const sourceUav = uavMap.get(sourceId);
-                const destUav = uavMap.get(destId);
+            } else {
+                // 被合并路径：使用虚线，加粗加深
+                context.setLineDash([10, 6]);
+                const lineWidth = 4.5;
+                const arrowSize = 12;
                 
-                if (sourceUav) {
-                    drawPathNumberLabel(context, sourceUav.x, sourceUav.y, mergeIndex + 1, color, 'S');
-                }
+                // 颜色加深（降低透明度）
+                const deepColor = color.includes('rgb') 
+                    ? color.replace(')', ', 0.9)').replace('rgb', 'rgba')
+                    : color;
                 
-                if (destUav) {
-                    drawPathNumberLabel(context, destUav.x, destUav.y, mergeIndex + 1, color, 'D');
-                    
-                    if (groupInfo) {
-                        drawMergedDestinationMarker(context, destUav, color, groupInfo.indices.length);
+                for (let i = 0; i < pathNodeIds.length - 1; i++) {
+                    const uav1 = uavMap.get(pathNodeIds[i]);
+                    const uav2 = uavMap.get(pathNodeIds[i+1]);
+                    if (uav1 && uav2) {
+                        drawArrow(context, uav1.x, uav1.y, uav2.x, uav2.y, arrowSize, deepColor, lineWidth);
                     }
                 }
             }
         } else {
-            // 非合并路径：全段虚线，较细，较淡
+            // 非合并路径：对照组中使用细虚线
             context.setLineDash([8, 4]);
             const lineWidth = 2;
             const arrowSize = 8;
-            
-            // 使用稍微透明的颜色
-            const dashedColor = color.includes('rgb') 
-                ? color.replace(')', ', 0.6)').replace('rgb', 'rgba')
-                : color + '99'; // 添加透明度
             
             for (let i = 0; i < pathNodeIds.length - 1; i++) {
                 const uav1 = uavMap.get(pathNodeIds[i]);
                 const uav2 = uavMap.get(pathNodeIds[i+1]);
                 if (uav1 && uav2) {
-                    drawArrow(context, uav1.x, uav1.y, uav2.x, uav2.y, arrowSize, dashedColor, lineWidth);
+                    drawArrow(context, uav1.x, uav1.y, uav2.x, uav2.y, arrowSize, color, lineWidth);
                 }
             }
         }
@@ -731,93 +524,6 @@ document.addEventListener('DOMContentLoaded', () => {
         context.restore();
     }
     
-    function drawPathNumberLabel(context, x, y, number, color, type) {
-        // type: 'S' for source, 'D' for destination
-        context.save();
-        
-        const offsetX = type === 'S' ? -35 : 35;
-        const offsetY = -35;
-        const labelX = x + offsetX;
-        const labelY = y + offsetY;
-        
-        // 绘制连接线
-        context.strokeStyle = color;
-        context.lineWidth = 2.5;
-        context.setLineDash([]);
-        context.beginPath();
-        context.moveTo(x, y);
-        context.lineTo(labelX, labelY + 15);
-        context.stroke();
-        
-        // 绘制箭头
-        const angle = Math.atan2(labelY + 15 - y, labelX - x);
-        context.fillStyle = color;
-        context.beginPath();
-        context.moveTo(labelX, labelY + 15);
-        context.lineTo(labelX - 6 * Math.cos(angle - Math.PI / 6), labelY + 15 - 6 * Math.sin(angle - Math.PI / 6));
-        context.lineTo(labelX - 6 * Math.cos(angle + Math.PI / 6), labelY + 15 - 6 * Math.sin(angle + Math.PI / 6));
-        context.closePath();
-        context.fill();
-        
-        // 绘制标签背景（圆形）
-        context.fillStyle = color;
-        context.beginPath();
-        context.arc(labelX, labelY, 18, 0, Math.PI * 2);
-        context.fill();
-        
-        // 绘制白色外圈
-        context.strokeStyle = 'white';
-        context.lineWidth = 3;
-        context.stroke();
-        
-        // 绘制类型文字（小字）
-        context.fillStyle = 'white';
-        context.font = 'bold 9px Arial';
-        context.textAlign = 'center';
-        context.textBaseline = 'middle';
-        context.fillText(type === 'S' ? '起' : '终', labelX, labelY - 5);
-        
-        // 绘制编号（大字）
-        context.font = 'bold 14px Arial';
-        context.fillText(number, labelX, labelY + 6);
-        
-        context.restore();
-    }
-    
-    function drawMergePathMarker(context, x1, y1, x2, y2, color) {
-        // 在路径起始处绘制小的合并标记
-        const midX = (x1 + x2) / 2;
-        const midY = (y1 + y2) / 2;
-        
-        context.save();
-        context.fillStyle = 'rgba(138, 43, 226, 0.8)';
-        context.strokeStyle = 'white';
-        context.lineWidth = 1;
-        
-        // 绘制小圆圈
-        context.beginPath();
-        context.arc(midX, midY, 5, 0, Math.PI * 2);
-        context.fill();
-        context.stroke();
-        
-        context.restore();
-    }
-    
-    function drawMergedDestinationMarker(context, uav, color, mergeCount) {
-        // 在合并的目标节点周围绘制特殊标记
-        context.save();
-        
-        // 绘制紫色光晕效果
-        context.strokeStyle = 'rgba(138, 43, 226, 0.5)';
-        context.lineWidth = 2;
-        context.setLineDash([3, 3]);
-        
-        context.beginPath();
-        context.arc(uav.x, uav.y, UAV_RADIUS + 10, 0, Math.PI * 2);
-        context.stroke();
-        
-        context.restore();
-    }
 
     // 简单版本：普通实线箭头
     function drawArrowSimple(context, fromX, fromY, toX, toY, arrowSize = 10, color = 'rgba(255, 0, 0, 0.7)', lineWidth = 2) {
@@ -895,36 +601,6 @@ document.addEventListener('DOMContentLoaded', () => {
         context.restore();
     }
 
-    function highlightMergeTarget(context, target) {
-        const uav = uavMap.get(target.uav_id);
-        if (!uav) return;
-        
-        context.save();
-        
-        // 绘制目标节点的特殊标记（双环圈）
-        context.strokeStyle = 'red';
-        context.lineWidth = 3;
-        context.setLineDash([]);
-        
-        // 外环
-        context.beginPath();
-        context.arc(uav.x, uav.y, UAV_RADIUS + 8, 0, Math.PI * 2);
-        context.stroke();
-        
-        // 内环
-        context.beginPath();
-        context.arc(uav.x, uav.y, UAV_RADIUS + 4, 0, Math.PI * 2);
-        context.stroke();
-        
-        // 添加"T"标记表示Target
-        context.fillStyle = 'red';
-        context.font = 'bold 10px Arial';
-        context.textAlign = 'center';
-        context.textBaseline = 'middle';
-        context.fillText('T', uav.x, uav.y + UAV_RADIUS + 20);
-        
-        context.restore();
-    }
 
     // 获取MTP剪枝数据的函数（带重试机制）
     async function fetchMTPPruningData(retryCount = 0) {

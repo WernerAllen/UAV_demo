@@ -413,24 +413,58 @@ class MTPRoutingModel:
             # print(f"🔍 MTP: 记录椭圆区域 {source_id}→{dest_id}")
 
     def _group_roots_by_distance(self, destination_ids):
-        """将距离较近的目标节点分为一组，返回分组列表。"""
-        groups = []
-        used = set()
+        """
+        将距离较近的目标节点分为一组，使用并查集算法确保传递闭包。
+        如果 A-B < 阈值 且 B-C < 阈值，则 A、B、C 都在同一组（即使 A-C > 阈值）
+        """
+        print(f"\n🔍 开始合并目标节点，总数: {len(destination_ids)}, 阈值: {self.MERGE_DISTANCE_THRESHOLD}m")
+        
+        # 并查集：parent[i] 表示节点i的父节点
+        parent = {id: id for id in destination_ids}
+        
+        def find(x):
+            """查找根节点（带路径压缩）"""
+            if parent[x] != x:
+                parent[x] = find(parent[x])
+            return parent[x]
+        
+        def union(x, y):
+            """合并两个集合"""
+            root_x = find(x)
+            root_y = find(y)
+            if root_x != root_y:
+                parent[root_y] = root_x
+        
+        # 计算所有节点对之间的距离，如果小于阈值则合并
         for i, id1 in enumerate(destination_ids):
-            if id1 in used:
-                continue
-            group = [id1]
             uav1 = self.uav_map[id1]
             for j, id2 in enumerate(destination_ids):
-                if i == j or id2 in used:
+                if i >= j:  # 避免重复计算
                     continue
                 uav2 = self.uav_map[id2]
                 dist = math.sqrt((uav1.x - uav2.x) ** 2 + (uav1.y - uav2.y) ** 2 + (uav1.z - uav2.z) ** 2)
+                
                 if dist < self.MERGE_DISTANCE_THRESHOLD:
-                    group.append(id2)
-                    used.add(id2)
-            used.add(id1)
-            groups.append(group)
+                    print(f"  ✅ {id1} ↔ {id2}: {dist:.1f}m < {self.MERGE_DISTANCE_THRESHOLD}m (合并)")
+                    union(id1, id2)
+        
+        # 将节点按根节点分组
+        groups_dict = {}
+        for id in destination_ids:
+            root = find(id)
+            if root not in groups_dict:
+                groups_dict[root] = []
+            groups_dict[root].append(id)
+        
+        # 转换为列表格式
+        groups = list(groups_dict.values())
+        
+        # 打印合并结果
+        for group in groups:
+            if len(group) > 1:
+                print(f"  📦 形成合并组: {group} (共{len(group)}个节点)")
+        
+        print(f"🔍 合并完成，共形成 {len(groups)} 个组\n")
         return groups
 
     def _create_virtual_root_for_group(self, group):
