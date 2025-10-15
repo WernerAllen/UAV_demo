@@ -298,13 +298,14 @@ def get_mtp_pruning_data_endpoint():
             if hasattr(routing_model, 'root_groups') and routing_model.root_groups:
                 for group in routing_model.root_groups:
                     if len(group) > 1:
-                        # 第一个是主根，其余是合并目标
+                        # 所有组内节点都是合并目标（包括主根）
                         main_root = group[0]
-                        for merge_target in group[1:]:
+                        for target_node in group:
                             pruning_data["merge_targets"].append({
-                                "uav_id": merge_target,
+                                "uav_id": target_node,
                                 "main_root_id": main_root,
-                                "group_size": len(group)
+                                "group_size": len(group),
+                                "is_main_root": (target_node == main_root)
                             })
                 
                 pruning_data["tree_groups"] = routing_model.root_groups

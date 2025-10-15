@@ -122,6 +122,15 @@ ELLIPSE_BOUNDARY_TOLERANCE = 4.0  # 椭圆边界容差(米)，用于判断节点
 # 更新频率配置（影响实时性和计算开销）
 PRUNING_UPDATE_INTERVAL = 0.4  # ETX更新间隔时间(秒)
                                # 0.3=高频 | 0.4=平衡 | 0.6=低频
+
+# 路径合并优化配置
+PATH_MERGE_ENABLED = True  # 是否启用路径合并优化（仅MTP协议）
+PATH_MERGE_DISTANCE_THRESHOLD = 20.0  # 相邻路径段的平均距离阈值(米)
+PATH_MERGE_MIN_SEGMENT_LENGTH = 2  # 可合并的最小路径段长度（跳数）
+PATH_MERGE_ENERGY_SAVING = 1  # 路径合并带来的能耗节省系数（相对于树维护能耗）
+PATH_MERGE_MAX_SEGMENT_LENGTH = 5  # 最大路径段长度（跳数），限制计算复杂度
+PATH_MERGE_MAX_MERGES = 20  # 最大合并数量，避免过度合并
+
 # - 仿真结束后计算: 总能耗 / 成功传输的数据包数 = 平均每包能耗
 
 
