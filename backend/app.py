@@ -335,6 +335,13 @@ def get_mtp_pruning_data_endpoint():
                 pruning_data["tree_groups"] = routing_model.root_groups
                 pruning_data["virtual_roots"] = virtual_roots_info
         
+        # 添加路径合并配置参数
+        pruning_data["path_merge_config"] = {
+            "distance_threshold": simulation_config.PATH_MERGE_DISTANCE_THRESHOLD,
+            "min_segment_length": simulation_config.PATH_MERGE_MIN_SEGMENT_LENGTH,
+            "max_segment_length": simulation_config.PATH_MERGE_MAX_SEGMENT_LENGTH
+        }
+    
     return jsonify(pruning_data)
 
 @app.route('/api/simulation/trigger-mtp-pruning', methods=['POST'])

@@ -302,80 +302,218 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    // 完整版本：MTP对照组用，基于后端真实合并数据显示
+    /**
+     * 检测两条路径之间的可合并段
+     * @param {Array} path1 - 路径1的节点ID数组
+     * @param {Array} path2 - 路径2的节点ID数组
+     * @param {number} threshold - 距离阈值（米）
+     * @param {number} minSegmentLength - 最小段长度
+     * @returns {Array} 可合并段信息数组 [{path1Indices: [start, end], path2Indices: [start, end], avgDistance: number}]
+     */
+    function detectMergeableSegments(path1, path2, threshold = 30, minSegmentLength = 2) {
+        const mergeableSegments = [];
+        
+        // 遍历所有可能的段
+        for (let i = 0; i < path1.length - minSegmentLength + 1; i++) {
+            for (let j = 0; j < path2.length - minSegmentLength + 1; j++) {
+                // 尝试不同的段长度
+                for (let len = minSegmentLength; len <= Math.min(path1.length - i, path2.length - j); len++) {
+                    // 计算这个段内所有节点对的平均距离
+                    let totalDistance = 0;
+                    let validPairs = 0;
+                    
+                    for (let k = 0; k < len; k++) {
+                        const uav1 = uavMap.get(path1[i + k]);
+                        const uav2 = uavMap.get(path2[j + k]);
+                        if (uav1 && uav2) {
+                            const dist = Math.sqrt(
+                                Math.pow(uav1.x - uav2.x, 2) + 
+                                Math.pow(uav1.y - uav2.y, 2) + 
+                                Math.pow(uav1.z - uav2.z, 2)
+                            );
+                            totalDistance += dist;
+                            validPairs++;
+                        }
+                    }
+                    
+                    if (validPairs === len) {
+                        const avgDistance = totalDistance / validPairs;
+                        if (avgDistance < threshold) {
+                            mergeableSegments.push({
+                                path1Indices: [i, i + len - 1],
+                                path2Indices: [j, j + len - 1],
+                                avgDistance: avgDistance,
+                                segmentLength: len
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 返回最优段（按段长度和平均距离排序）
+        mergeableSegments.sort((a, b) => {
+            if (b.segmentLength !== a.segmentLength) {
+                return b.segmentLength - a.segmentLength; // 优先选择更长的段
+            }
+            return a.avgDistance - b.avgDistance; // 距离更近的优先
+        });
+        
+        return mergeableSegments.length > 0 ? [mergeableSegments[0]] : [];
+    }
+    
+    /**
+     * 绘制路径段（支持实线和虚线）
+     * @param {CanvasRenderingContext2D} context
+     * @param {Array} pathNodeIds - 完整路径节点ID数组
+     * @param {Array} segmentIndices - 要绘制的段索引 [startIdx, endIdx]
+     * @param {string} color - 颜色（保持路径原色）
+     * @param {boolean} isPrimary - 是否主路径（true=粗实线主合并, false=细实线被合并）
+     */
+    function drawPathSegment(context, pathNodeIds, segmentIndices, color, isPrimary = true) {
+        const [startIdx, endIdx] = segmentIndices;
+        if (!pathNodeIds || startIdx >= endIdx || endIdx >= pathNodeIds.length) return;
+        
+        context.save();
+        
+        if (isPrimary) {
+            // 主合并段：粗实线
+            context.setLineDash([]);
+            context.lineWidth = 4;
+        } else {
+            // 被合并段：细实线
+            context.setLineDash([]);
+            context.lineWidth = 2;
+        }
+        
+        const arrowSize = 12;
+        
+        for (let i = startIdx; i < endIdx; i++) {
+            const uav1 = uavMap.get(pathNodeIds[i]);
+            const uav2 = uavMap.get(pathNodeIds[i + 1]);
+            if (uav1 && uav2) {
+                drawArrow(context, uav1.x, uav1.y, uav2.x, uav2.y, arrowSize, color, context.lineWidth);
+            }
+        }
+        
+        context.restore();
+    }
+    
+    // 完整版本：MTP对照组用，同时显示虚拟根节点合并和路径段合并
     function drawMultiplePaths(context, pathsData) {
         const colors = ['#FF4136', '#0074D9', '#2ECC40', '#FFDC00', '#B10DC9', '#FF851B', '#7FDBFF', '#3D9970'];
         
-        // 调试：显示所有路径的目标节点
-        console.log('📍 所有路径的目标节点:', pathsData.map(p => p.destination));
+        // 从后端配置获取路径合并参数，如果没有则使用默认值
+        const MERGE_THRESHOLD = mtpPruningData?.path_merge_config?.distance_threshold || 30;
+        const MIN_SEGMENT_LENGTH = mtpPruningData?.path_merge_config?.min_segment_length || 2;
         
-        // 获取合并组中的目标节点集合
+        console.log(`🔍 开始绘制MTP路径... (阈值=${MERGE_THRESHOLD}m, 最小段长=${MIN_SEGMENT_LENGTH})`);
+        
+        // 1. 获取虚拟根节点合并组信息
         const mergedDestinations = new Set();
-        const mergedGroups = [];
         if (mtpPruningData && mtpPruningData.tree_groups) {
-            console.log('📦 后端返回的所有分组:', mtpPruningData.tree_groups);
-            
-            mtpPruningData.tree_groups.forEach((group, idx) => {
+            mtpPruningData.tree_groups.forEach(group => {
                 if (group.length > 1) {
-                    mergedGroups.push(group);
                     group.forEach(nodeId => mergedDestinations.add(nodeId));
-                    console.log(`  合并组${idx}: [${group.join(', ')}] (${group.length}个节点)`);
-                } else {
-                    console.log(`  单节点组${idx}: [${group[0]}]`);
                 }
             });
-            console.log('🔍 合并组节点集合:', Array.from(mergedDestinations));
+            console.log('📦 虚拟根节点合并组:', Array.from(mergedDestinations));
         }
         
-        // 检查哪些合并组节点有路径，哪些没有
-        const destinationsSet = new Set(pathsData.map(p => p.destination));
-        const missingNodes = Array.from(mergedDestinations).filter(nodeId => !destinationsSet.has(nodeId));
-        if (missingNodes.length > 0) {
-            console.warn('⚠️ 以下合并组节点没有对应的路径:', missingNodes);
+        // 2. 检测路径段合并
+        const segmentMergeInfo = [];
+        for (let i = 0; i < pathsData.length; i++) {
+            for (let j = i + 1; j < pathsData.length; j++) {
+                const path1 = pathsData[i].path;
+                const path2 = pathsData[j].path;
+                
+                const segments = detectMergeableSegments(path1, path2, MERGE_THRESHOLD, MIN_SEGMENT_LENGTH);
+                
+                if (segments.length > 0) {
+                    const segment = segments[0];
+                    console.log(`✅ 路径段合并 ${i} ↔ ${j}: [${segment.path1Indices}] ↔ [${segment.path2Indices}], 距离=${segment.avgDistance.toFixed(1)}m`);
+                    
+                    const isPrimaryPath1 = path1.length <= path2.length;
+                    
+                    segmentMergeInfo.push({
+                        pathIndex: i,
+                        segmentIndices: segment.path1Indices,
+                        isPrimary: isPrimaryPath1
+                    });
+                    
+                    segmentMergeInfo.push({
+                        pathIndex: j,
+                        segmentIndices: segment.path2Indices,
+                        isPrimary: !isPrimaryPath1
+                    });
+                }
+            }
         }
         
-        // 绘制所有路径
-        let mergedCount = 0;
+        // 3. 绘制所有路径
         pathsData.forEach((pathInfo, index) => {
             const color = colors[index % colors.length];
-            if (pathInfo.path) {
-                // 检查路径的目标节点是否在合并组中
-                const isMergedPath = mergedDestinations.has(pathInfo.destination);
+            if (!pathInfo.path || pathInfo.path.length < 2) return;
+            
+            const path = pathInfo.path;
+            const destination = pathInfo.destination;
+            
+            // 检查是否属于虚拟根节点合并组
+            const isInMergeGroup = mergedDestinations.has(destination);
+            
+            // 检查是否有路径段合并
+            const segmentMerges = segmentMergeInfo.filter(m => m.pathIndex === index);
+            
+            if (isInMergeGroup && segmentMerges.length === 0) {
+                // 情况1: 只有虚拟根节点合并，无路径段合并 -> 整条路径用粗虚线（绿色）
+                console.log(`  🌳 路径${index} (目标${destination}): 虚拟根合并组 -> 绿色粗虚线`);
+                drawPathWithStyle(context, path, color, 'thick-dashed-green');
+            } else if (segmentMerges.length > 0) {
+                // 情况2: 有路径段合并 -> 分段绘制
+                // 先绘制整条路径（细虚线作为基础）
+                drawPath(context, path, color, false, false, null);
                 
-                if (isMergedPath) {
-                    // 合并组相关路径：粗虚线
-                    mergedCount++;
-                    console.log(`✅ 路径${index}: 源${pathInfo.source}→目标${pathInfo.destination} (合并组路径)`);
-                    drawPathThickSolid(context, pathInfo.path, color);
-                } else {
-                    // 普通路径：细虚线
-                    drawPath(context, pathInfo.path, color, false, false, null);
-                }
+                // 再在合并段上覆盖绘制粗线
+                segmentMerges.forEach(seg => {
+                    drawPathSegment(context, path, seg.segmentIndices, color, seg.isPrimary);
+                });
+            } else {
+                // 情况3: 既无虚拟根合并也无路径段合并 -> 细虚线
+                drawPath(context, pathInfo.path, color, false, false, null);
             }
         });
         
-        console.log(`📊 总路径数: ${pathsData.length}, 合并组路径: ${mergedCount}, 合并组节点: ${mergedDestinations.size}`);
+        console.log(`📊 路径总数: ${pathsData.length}, 虚拟根合并: ${mergedDestinations.size}个节点, 路径段合并: ${segmentMergeInfo.length / 2}对`);
         
-        // 如果有后端返回的合并组数据，绘制虚拟根节点
+        // 绘制虚拟根节点标记
         if (mtpPruningData && mtpPruningData.tree_groups) {
             drawVirtualRootMarkersFromBackend(context, mtpPruningData.tree_groups);
         }
     }
     
-    // 绘制粗虚线路径（用于合并组相关路径）
-    function drawPathThickSolid(context, pathNodeIds, color) {
+    /**
+     * 绘制指定样式的完整路径
+     * @param {string} style - 'thick-dashed-green' 或其他样式
+     */
+    function drawPathWithStyle(context, pathNodeIds, color, style) {
         if (!pathNodeIds || pathNodeIds.length < 2) return;
         
         context.save();
-        context.setLineDash([10, 6]); // 虚线
-        const lineWidth = 4; // 粗线
+        
+        if (style === 'thick-dashed-green') {
+            // 虚拟根节点合并组路径：绿色粗虚线
+            context.setLineDash([10, 6]);
+            context.lineWidth = 4;
+            color = '#4CAF50'; // 绿色
+        }
+        
         const arrowSize = 12;
         
         for (let i = 0; i < pathNodeIds.length - 1; i++) {
             const uav1 = uavMap.get(pathNodeIds[i]);
-            const uav2 = uavMap.get(pathNodeIds[i+1]);
+            const uav2 = uavMap.get(pathNodeIds[i + 1]);
             if (uav1 && uav2) {
-                drawArrow(context, uav1.x, uav1.y, uav2.x, uav2.y, arrowSize, color, lineWidth);
+                drawArrow(context, uav1.x, uav1.y, uav2.x, uav2.y, arrowSize, color, context.lineWidth);
             }
         }
         

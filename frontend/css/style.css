@@ -200,7 +200,7 @@ body.mtp-mode .canvas-header {
     height: 2px;
 }
 
-.dashed-thick-line {
+.dashed-thick-green-line {
     background: repeating-linear-gradient(
         to right,
         #4CAF50 0px,
@@ -209,6 +209,18 @@ body.mtp-mode .canvas-header {
         transparent 16px
     );
     height: 4px;
+}
+
+.solid-thick-line {
+    background: #666;
+    height: 4px;
+    width: 50px;
+}
+
+.solid-thin-line {
+    background: #666;
+    height: 2px;
+    width: 50px;
 }
 
 #simulationCanvas, #mtpCanvas {
