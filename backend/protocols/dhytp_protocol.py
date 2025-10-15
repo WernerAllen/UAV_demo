@@ -312,8 +312,12 @@ class DHyTPRoutingModel:
 
     def _build_enhanced_virtual_trees(self, source_id=None):
         """
-        构建增强的多层虚拟树结构，支持目标节点合并和拥塞感知
-        树剪枝增强：支持基于椭圆区域的树构建优化
+        构建增强的多层虚拟树结构（方案B：虚拟根节点中心化策略）
+        
+        改进策略：
+        1. 为距离阈值内的目标节点组创建虚拟根节点（组的几何中心）
+        2. 从虚拟根节点开始构建中心化的树结构
+        3. 支持树剪枝优化和拥塞感知
         
         Args:
             source_id: 源节点ID（用于树剪枝）
@@ -335,31 +339,54 @@ class DHyTPRoutingModel:
 
         # 将距离较近的目标节点分组
         self.root_groups = self._group_roots_by_distance(self.destination_list)
+        
+        # print(f"🌳 DHYTP: 开始构建中心化虚拟树，共{len(self.root_groups)}个目标组")
 
-        for group in self.root_groups:
-            # 以第一个目标为主树根
-            root_id = group[0]
-            self.root_nodes.append(root_id)
+        for group_idx, group in enumerate(self.root_groups):
+            # 🌟 方案B核心改进：为组创建虚拟根节点（几何中心）
+            virtual_root_id = self._create_virtual_root_for_group(group)
+            self.root_nodes.append(virtual_root_id)
             
-            # ## **** TREE PRUNING MODIFICATION START: 使用剪枝树构建 **** ##
+            # print(f"  组{group_idx + 1}: 目标节点={group}, 虚拟根=UAV-{virtual_root_id}")
+            
+            # 从虚拟根构建中心化的树
             if TREE_PRUNING_ENABLED and source_id:
-                # 使用基于椭圆区域的剪枝树构建
-                tree = self.build_pruned_tree_for_pair_dhytp(source_id, root_id)
+                # 使用剪枝策略构建中心化树
+                tree = self._build_centralized_pruned_tree_dhytp(virtual_root_id, group, source_id)
             else:
-                # 使用原有的树构建方法
-                tree = self._build_tree_for_root(root_id)
-            # ## **** TREE PRUNING MODIFICATION END **** ##
+                # 标准中心化树构建
+                tree = self._build_centralized_tree_dhytp(virtual_root_id, group)
 
-            # 合并组内其他目标节点的树
-            for other_id in group[1:]:
-                if TREE_PRUNING_ENABLED and source_id:
-                    other_tree = self.build_pruned_tree_for_pair_dhytp(source_id, other_id)
-                else:
-                    other_tree = self._build_tree_for_root(other_id)
-                tree = self._merge_tree(tree, other_tree)
+            self.virtual_trees[virtual_root_id] = tree
+            
+            # 输出树统计信息（已禁用）
+            # self._print_tree_statistics(virtual_root_id, tree, group)
 
-            self.virtual_trees[root_id] = tree
-
+    def _create_virtual_root_for_group(self, group):
+        """
+        为目标节点组选择虚拟根节点（继承自MTP）
+        策略：选择距离几何中心最近的UAV作为虚拟根
+        """
+        return self.mtp._create_virtual_root_for_group(group)
+    
+    def _build_centralized_tree_dhytp(self, virtual_root_id, target_group):
+        """
+        从虚拟根构建中心化的树（DHyTP版本）
+        继承MTP的实现但使用DHyTP的配置
+        """
+        return self.mtp._build_centralized_tree(virtual_root_id, target_group)
+    
+    def _build_centralized_pruned_tree_dhytp(self, virtual_root_id, target_group, source_id):
+        """
+        从虚拟根构建剪枝后的中心化树（DHyTP版本）
+        继承MTP的实现但使用DHyTP的配置
+        """
+        return self.mtp._build_centralized_pruned_tree(virtual_root_id, target_group, source_id)
+    
+    def _print_tree_statistics(self, root_id, tree, target_group):
+        """打印树的统计信息（继承自MTP）"""
+        return self.mtp._print_tree_statistics(root_id, tree, target_group)
+    
     def _group_roots_by_distance(self, destination_ids):
         """将距离较近的目标节点分为一组，返回分组列表"""
         groups = []

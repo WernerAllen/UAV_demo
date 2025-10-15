@@ -315,9 +315,13 @@ class MTPRoutingModel:
 
     def build_virtual_tree_structures(self, destination_ids=None, source_id=None):
         """
-        构建多层虚拟树结构，选择RootNodes。
-        论文MTP增强：支持目标节点合并树
-        树剪枝增强：支持基于椭圆区域的树构建优化
+        构建多层虚拟树结构（方案B：虚拟根节点中心化策略）
+        
+        改进策略：
+        1. 为距离阈值内的目标节点组创建虚拟根节点（组的几何中心）
+        2. 从虚拟根节点开始构建中心化的树结构
+        3. 所有目标节点平等连接到虚拟根，避免合并顺序敏感
+        4. 支持树剪枝优化
         
         Args:
             destination_ids: 目标节点ID列表
@@ -337,40 +341,36 @@ class MTPRoutingModel:
             print(f"⚡ MTP: 累计树创建能耗 +{tree_creation_energy:.2f}J")
         # ## **** ENERGY MODIFICATION END **** ##
         
-        # 论文MTP增强：路径合并机制
+        # 论文MTP增强：路径合并机制（分组）
         self.root_groups = self._group_roots_by_distance(destination_ids)
         
-        # 注意：这里不记录椭圆区域，等待后续调用record_actual_source_dest_pairs来记录
-        # 避免重复记录导致椭圆数量与路径不匹配
+        # print(f"🌳 MTP: 开始构建中心化虚拟树，共{len(self.root_groups)}个目标组")
         
-        for group in self.root_groups:
-            # 以第一个目标为主树根
-            root_id = group[0]
-            self.root_nodes.append(root_id)
+        for group_idx, group in enumerate(self.root_groups):
+            # 🌟 方案B核心改进：为组创建虚拟根节点（几何中心）
+            virtual_root_id = self._create_virtual_root_for_group(group)
+            self.root_nodes.append(virtual_root_id)
             
-            # ## **** TREE PRUNING MODIFICATION START: 使用剪枝树构建 **** ##
+            # print(f"  组{group_idx + 1}: 目标节点={group}, 虚拟根=UAV-{virtual_root_id}")
+            
+            # 从虚拟根构建中心化的树
             if TREE_PRUNING_ENABLED and source_id:
-                # 使用基于椭圆区域的剪枝树构建
-                tree = self.build_pruned_tree_for_pair(source_id, root_id)
+                # 使用剪枝策略构建中心化树
+                tree = self._build_centralized_pruned_tree(virtual_root_id, group, source_id)
             else:
-                # 使用原有的树构建方法
-                tree = self._build_tree_for_root(root_id)
-            # ## **** TREE PRUNING MODIFICATION END **** ##
+                # 标准中心化树构建
+                tree = self._build_centralized_tree(virtual_root_id, group)
             
-            # 合并组内其他目标节点
-            for other_id in group[1:]:
-                if TREE_PRUNING_ENABLED and source_id:
-                    other_tree = self.build_pruned_tree_for_pair(source_id, other_id)
-                else:
-                    other_tree = self._build_tree_for_root(other_id)
-                tree = self._merge_tree(tree, other_tree)
-            self.virtual_trees[root_id] = tree
+            self.virtual_trees[virtual_root_id] = tree
+            
+            # 输出树统计信息（已禁用详细输出）
+            # self._print_tree_statistics(virtual_root_id, tree, group)
         
-        print(f"🌳 MTP: 构建完成，共{len(self.root_groups)}个根组，椭圆区域数量: {len(self.ellipse_regions)}")
+        # print(f"🌳 MTP: 构建完成，共{len(self.root_groups)}个虚拟根，椭圆区域数量: {len(self.ellipse_regions)}")
 
     def record_actual_source_dest_pairs(self, source_dest_pairs):
         """记录实际的源-目标对的椭圆区域信息"""
-        print(f"🎯 MTP: 记录实际源-目标对的椭圆区域，共{len(source_dest_pairs)}对")
+        # print(f"🎯 MTP: 记录实际源-目标对的椭圆区域，共{len(source_dest_pairs)}对")
         
         # 清除之前的椭圆区域记录
         self.ellipse_regions.clear()
@@ -393,7 +393,7 @@ class MTPRoutingModel:
                 'destination': dest_uav,
                 'last_update': time.time()
             }
-            print(f"🔍 MTP: 记录椭圆区域 {source_id}→{dest_id}")
+            # print(f"🔍 MTP: 记录椭圆区域 {source_id}→{dest_id}")
 
     def _group_roots_by_distance(self, destination_ids):
         """将距离较近的目标节点分为一组，返回分组列表。"""
@@ -416,8 +416,243 @@ class MTPRoutingModel:
             groups.append(group)
         return groups
 
+    def _create_virtual_root_for_group(self, group):
+        """
+        为目标节点组选择虚拟根节点
+        策略：选择距离几何中心最近的UAV作为虚拟根
+        
+        Args:
+            group: 目标节点ID列表
+            
+        Returns:
+            virtual_root_id: 虚拟根节点ID
+        """
+        # 计算组的几何中心
+        center_x = sum(self.uav_map[id].x for id in group) / len(group)
+        center_y = sum(self.uav_map[id].y for id in group) / len(group)
+        center_z = sum(self.uav_map[id].z for id in group) / len(group)
+        
+        # 选择距离中心最近的UAV作为虚拟根
+        min_dist = float('inf')
+        virtual_root_id = None
+        
+        for uav_id, uav in self.uav_map.items():
+            dist = math.sqrt(
+                (uav.x - center_x)**2 + 
+                (uav.y - center_y)**2 + 
+                (uav.z - center_z)**2
+            )
+            if dist < min_dist:
+                min_dist = dist
+                virtual_root_id = uav_id
+        
+        # print(f"    ├─ 组中心: ({center_x:.1f}, {center_y:.1f}, {center_z:.1f})")
+        # print(f"    └─ 虚拟根: UAV-{virtual_root_id}, 距中心: {min_dist:.1f}m")
+        
+        return virtual_root_id
+    
+    def _build_centralized_tree(self, virtual_root_id, target_group):
+        """
+        从虚拟根构建中心化的树
+        使用BFS确保所有节点能高效连接到虚拟根
+        
+        Args:
+            virtual_root_id: 虚拟根节点ID
+            target_group: 目标节点列表
+            
+        Returns:
+            tree: {node_id: parent_id} 映射
+        """
+        tree = {virtual_root_id: None}  # 根节点
+        visited = set([virtual_root_id])
+        queue = [virtual_root_id]
+        
+        # 跟踪已覆盖的目标节点
+        targets_covered = {virtual_root_id} if virtual_root_id in target_group else set()
+        
+        # BFS构建树，优先覆盖目标节点
+        while queue:
+            current_id = queue.pop(0)
+            current_uav = self.uav_map[current_id]
+            
+            # 获取邻居
+            neighbors = self._get_neighbors(current_uav)
+            
+            for neighbor in neighbors:
+                if neighbor.id not in visited:
+                    # 在已访问节点中找到最优父节点
+                    best_parent_id = self._find_best_parent_in_visited(neighbor, visited)
+                    
+                    if best_parent_id:
+                        tree[neighbor.id] = best_parent_id
+                        visited.add(neighbor.id)
+                        queue.append(neighbor.id)
+                        
+                        # 标记目标节点已覆盖
+                        if neighbor.id in target_group:
+                            targets_covered.add(neighbor.id)
+                            # path = self._get_path_to_root(tree, neighbor.id)
+                            # print(f"    ✓ 目标 UAV-{neighbor.id} 已连接，路径: {path}")
+        
+        return tree
+    
+    def _build_centralized_pruned_tree(self, virtual_root_id, target_group, source_id):
+        """
+        从虚拟根构建剪枝后的中心化树
+        只在椭圆区域内构建树节点
+        
+        Args:
+            virtual_root_id: 虚拟根节点ID
+            target_group: 目标节点列表
+            source_id: 源节点ID（用于椭圆区域计算）
+            
+        Returns:
+            tree: {node_id: parent_id} 映射
+        """
+        tree = {virtual_root_id: None}
+        visited = set([virtual_root_id])
+        queue = [virtual_root_id]
+        
+        # 获取源节点
+        source_uav = self.uav_map.get(source_id)
+        if not source_uav:
+            # 如果没有源节点，回退到标准构建
+            return self._build_centralized_tree(virtual_root_id, target_group)
+        
+        targets_covered = {virtual_root_id} if virtual_root_id in target_group else set()
+        
+        # BFS构建树，只考虑椭圆区域内的节点
+        while queue:
+            current_id = queue.pop(0)
+            current_uav = self.uav_map[current_id]
+            
+            neighbors = self._get_neighbors(current_uav)
+            
+            for neighbor in neighbors:
+                if neighbor.id not in visited:
+                    # 检查是否在任一目标的椭圆区域内
+                    in_ellipse = False
+                    for target_id in target_group:
+                        target_uav = self.uav_map.get(target_id)
+                        if target_uav and neighbor.is_within_ellipse_region(source_uav, target_uav):
+                            in_ellipse = True
+                            break
+                    
+                    if in_ellipse or neighbor.id in target_group:
+                        # 节点在椭圆区域内或是目标节点
+                        best_parent_id = self._find_best_parent_in_visited(neighbor, visited)
+                        
+                        if best_parent_id:
+                            tree[neighbor.id] = best_parent_id
+                            visited.add(neighbor.id)
+                            queue.append(neighbor.id)
+                            
+                            if neighbor.id in target_group:
+                                targets_covered.add(neighbor.id)
+                                # path = self._get_path_to_root(tree, neighbor.id)
+                                # print(f"    ✓ 目标 UAV-{neighbor.id} 已连接（剪枝），路径: {path}")
+        
+        return tree
+    
+    def _find_best_parent_in_visited(self, node, visited):
+        """
+        在已访问节点中找到ETX最小的父节点
+        
+        Args:
+            node: 当前节点
+            visited: 已访问节点集合
+            
+        Returns:
+            best_parent_id: 最优父节点ID
+        """
+        min_etx = float('inf')
+        best_parent_id = None
+        
+        for parent_id in visited:
+            parent = self.uav_map.get(parent_id)
+            if parent:
+                dist = self._calculate_distance(node, parent)
+                if dist <= UAV_COMMUNICATION_RANGE:
+                    etx = self.get_link_base_delay(node, parent)
+                    if etx < min_etx:
+                        min_etx = etx
+                        best_parent_id = parent_id
+        
+        return best_parent_id
+    
+    def _get_path_to_root(self, tree, node_id):
+        """
+        获取从节点到根的路径（用于日志显示）
+        
+        Args:
+            tree: 树结构
+            node_id: 起始节点ID
+            
+        Returns:
+            path_str: 路径字符串
+        """
+        path = [node_id]
+        current = node_id
+        
+        while tree.get(current) is not None:
+            current = tree[current]
+            path.append(current)
+            if len(path) > 100:  # 防止环路
+                break
+        
+        return '→'.join(map(str, path))
+    
+    def _print_tree_statistics(self, root_id, tree, target_group):
+        """
+        打印树的统计信息（已禁用以提高性能）
+        
+        Args:
+            root_id: 根节点ID
+            tree: 树结构
+            target_group: 目标节点列表
+        """
+        # 已禁用详细输出以提高运行效率
+        pass
+        # total_nodes = len(tree)
+        # target_count = len(target_group)
+        # 
+        # # 计算平均跳数
+        # avg_hops = 0
+        # max_hops = 0
+        # for target_id in target_group:
+        #     hops = 0
+        #     current = target_id
+        #     while tree.get(current) is not None:
+        #         hops += 1
+        #         current = tree[current]
+        #         if hops > 100:  # 防止环路
+        #             break
+        #     avg_hops += hops
+        #     max_hops = max(max_hops, hops)
+        # avg_hops = avg_hops / target_count if target_count > 0 else 0
+        # 
+        # # 计算总ETX
+        # total_etx = 0
+        # for node_id, parent_id in tree.items():
+        #     if parent_id is not None:
+        #         node = self.uav_map.get(node_id)
+        #         parent = self.uav_map.get(parent_id)
+        #         if node and parent:
+        #             total_etx += self.get_link_base_delay(node, parent)
+        # avg_etx = total_etx / total_nodes if total_nodes > 0 else 0
+        # 
+        # print(f"    📊 树统计 [根: UAV-{root_id}]:")
+        # print(f"      ├─ 总节点数: {total_nodes}")
+        # print(f"      ├─ 目标节点: {target_count}")
+        # print(f"      ├─ 平均跳数: {avg_hops:.2f}")
+        # print(f"      ├─ 最大跳数: {max_hops}")
+        # print(f"      └─ 平均ETX: {avg_etx:.3f}")
+    
     def _merge_tree(self, tree1, tree2):
-        """合并两棵树，优先保留ETX更小的父节点。"""
+        """
+        合并两棵树，优先保留ETX更小的父节点
+        注意：此方法在新的中心化策略中已不再使用，保留用于向后兼容
+        """
         merged = dict(tree1)
         for node_id, parent_id in tree2.items():
             if node_id not in merged:
