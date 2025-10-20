@@ -1214,13 +1214,21 @@ class MACLayer:
             }
         
         # ## **** ENERGY MODIFICATION START: 获取协议能耗 **** ##
-        # 获取MTP或DHYTP协议的能耗数据
+        # 获取协议的能耗数据
         tree_creation_energy = 0.0
         tree_maintenance_energy = 0.0
         phase_transition_energy = 0.0
+        route_discovery_energy = 0.0
         maintenance_per_packet = 0.0
         
-        if ROUTING_MODEL == "MTP" and hasattr(self.routing_model, "accumulated_tree_creation_energy"):
+        if ROUTING_MODEL == "PTP":
+            from simulation_config import PROTOCOL_ENERGY_CONFIG
+            # PTP协议：每个数据包都需要路由发现
+            route_discovery_energy = PROTOCOL_ENERGY_CONFIG["PTP"]["ROUTE_DISCOVERY"]
+            
+            print(f"⚡ PTP路由发现能耗(每包): {route_discovery_energy:.2f}J")
+        
+        elif ROUTING_MODEL == "MTP" and hasattr(self.routing_model, "accumulated_tree_creation_energy"):
             from simulation_config import PROTOCOL_ENERGY_CONFIG
             # 获取配置中的树创建能耗，而不是累积值
             tree_creation_energy = PROTOCOL_ENERGY_CONFIG["MTP"]["TREE_CREATION"]
@@ -1231,6 +1239,12 @@ class MACLayer:
             print(f"⚡ MTP树创建能耗(每包): {tree_creation_energy:.2f}J")
             print(f"⚡ 累计MTP树维护能耗: {tree_maintenance_energy:.2f}J")
             print(f"⚡ 每包分摊的维护能耗: {maintenance_per_packet:.2f}J")
+            
+            # 显示路径合并节省的能耗
+            if hasattr(self.routing_model, "merge_energy_saved") and self.routing_model.merge_energy_saved > 0:
+                merge_saved_per_packet = self.routing_model.merge_energy_saved / total_packets if total_packets > 0 else 0
+                print(f"⚡ 路径合并节省能耗(总计): {self.routing_model.merge_energy_saved:.2f}J")
+                print(f"⚡ 每包分摊的维护能耗: {merge_saved_per_packet:.2f}J")
         
         elif ROUTING_MODEL == "DHYTP" and hasattr(self.routing_model, "accumulated_tree_creation_energy"):
             from simulation_config import PROTOCOL_ENERGY_CONFIG
@@ -1245,15 +1259,26 @@ class MACLayer:
             print(f"⚡ DHYTP阶段转换能耗(每包): {phase_transition_energy:.2f}J")
             print(f"⚡ 累计DHYTP树维护能耗: {tree_maintenance_energy:.2f}J")
             print(f"⚡ 每包分摊的维护能耗: {maintenance_per_packet:.2f}J")
+            
+            # 显示路径合并节省的能耗
+            if hasattr(self.routing_model, "merge_energy_saved") and self.routing_model.merge_energy_saved > 0:
+                merge_saved_per_packet = self.routing_model.merge_energy_saved / total_packets if total_packets > 0 else 0
+                print(f"⚡ 路径合并节省能耗(总计): {self.routing_model.merge_energy_saved:.2f}J")
+                print(f"⚡ 每包分摊的合并节省: {merge_saved_per_packet:.2f}J")
         
         # 为每个数据包添加协议能耗
         for packet in delivered_packets:
-            # 每个数据包都添加完整的树创建能耗和阶段转换能耗
-            packet.protocol_energy += tree_creation_energy + phase_transition_energy
-            # 维护能耗仍然按比例分摊
-            packet.protocol_energy += maintenance_per_packet
-            # 更新总能耗
-            packet.energy_consumed += tree_creation_energy + phase_transition_energy + maintenance_per_packet
+            if ROUTING_MODEL == "PTP":
+                # PTP协议：每个数据包都需要路由发现
+                packet.protocol_energy += route_discovery_energy
+                packet.energy_consumed += route_discovery_energy
+            else:
+                # MTP/DHYTP协议：树创建、阶段转换、树维护
+                packet.protocol_energy += tree_creation_energy + phase_transition_energy
+                # 维护能耗仍然按比例分摊
+                packet.protocol_energy += maintenance_per_packet
+                # 更新总能耗
+                packet.energy_consumed += tree_creation_energy + phase_transition_energy + maintenance_per_packet
         # ## **** ENERGY MODIFICATION END **** ##
         
         # 计算基础统计

@@ -1490,19 +1490,33 @@ class MTPRoutingModel:
             return ""
         
         # 3. 执行路径合并（优化：减少重复检查）
-        merged_count = self._execute_path_merging(mergeable_segments, PATH_MERGE_MAX_MERGES)
+        # 返回：(合并群组数, 实际合并的路径段数)
+        merged_group_count, total_merged_paths = self._execute_path_merging(mergeable_segments, PATH_MERGE_MAX_MERGES)
         
         # 4. 计算能耗节省
-        if merged_count > 0:
+        if merged_group_count > 0:
+            from simulation_config import PATH_MERGE_AVERAGE_PATHS_PER_GROUP
             tree_maintenance_energy = PROTOCOL_ENERGY_CONFIG["MTP"]["TREE_MAINTENANCE"]
-            energy_saved = merged_count * tree_maintenance_energy * PATH_MERGE_ENERGY_SAVING
+            
+            # 使用配置的平均路径数进行能耗估算
+            # 每组节省 (平均路径数 - 1) 条路径的维护能耗
+            estimated_merged_paths = merged_group_count * (PATH_MERGE_AVERAGE_PATHS_PER_GROUP - 1)
+            
+            # 能耗节省基于固定的假设值计算
+            energy_saved = estimated_merged_paths * tree_maintenance_energy * PATH_MERGE_ENERGY_SAVING
             self.merge_energy_saved += energy_saved
-            self.total_merge_operations += merged_count
+            self.total_merge_operations += merged_group_count
             
             # 更新树维护能耗（减少合并带来的节省）
             self.accumulated_tree_maintenance_energy -= energy_saved
             
-            return f"合并={merged_count}, 节省={energy_saved:.2f}J"
+            # 调试信息：显示详细的计算过程
+            print(f"  📊 合并详情: 群组数={merged_group_count}, 实际路径段={total_merged_paths}, 估算路径段={estimated_merged_paths:.1f}")
+            print(f"  📊 能耗计算: {estimated_merged_paths:.1f} × {tree_maintenance_energy} × {PATH_MERGE_ENERGY_SAVING} = {energy_saved:.2f}J")
+            print(f"  📊 累积节省: 本次={energy_saved:.2f}J, 总计={self.merge_energy_saved:.2f}J")
+            
+            # 显示：合并群组数和基于固定假设的能耗节省
+            return f"合并={merged_group_count}, 节省={energy_saved:.2f}J"
         
         return ""
     
@@ -1564,17 +1578,27 @@ class MTPRoutingModel:
     
     def _find_mergeable_path_segments(self, all_paths, distance_threshold, min_segment_length, max_segment_length=5):
         """
-        查找所有可合并的路径段（优化版）
+        查找所有可合并的路径段（聚类版本）
+        使用并查集将互相临近的路径段聚类成群组
         
         优化点：
         1. 减少日志输出
         2. 提前过滤长度不足的路径对
         3. 限制最大段长度避免过度计算
+        4. 对于每对路径，只保留距离最近的一个可合并段
+        5. 使用并查集聚类多条互相临近的路径
         
-        返回: [(path_id1, segment1, path_id2, segment2, avg_distance), ...]
+        返回: [merge_group1, merge_group2, ...]
+        每个merge_group是一个字典：{
+            'paths': [(path_id, segment_indices), ...],
+            'avg_distance': float,
+            'path_count': int
+        }
         """
-        mergeable_segments = []
         path_ids = list(all_paths.keys())
+        
+        # 第一步：找出所有路径对之间的最佳可合并段
+        pairwise_segments = {}  # {(path_id1, path_id2): segment_info}
         
         for i in range(len(path_ids)):
             path1_id = path_ids[i]
@@ -1597,10 +1621,87 @@ class MTPRoutingModel:
                     max_segment_length
                 )
                 
-                if segments:  # 优化：只添加非空结果
-                    mergeable_segments.extend(segments)
+                # 对于每对路径，只保留距离最近的一个段
+                if segments:
+                    best_segment = min(segments, key=lambda x: x[4])
+                    pair_key = tuple(sorted([path1_id, path2_id]))
+                    pairwise_segments[pair_key] = {
+                        'path1_id': path1_id,
+                        'seg1': best_segment[1],
+                        'path2_id': path2_id,
+                        'seg2': best_segment[3],
+                        'distance': best_segment[4]
+                    }
         
-        return mergeable_segments
+        # 第二步：使用并查集将互相临近的路径段聚类
+        merge_groups = self._cluster_mergeable_segments(pairwise_segments)
+        
+        return merge_groups
+    
+    def _cluster_mergeable_segments(self, pairwise_segments):
+        """
+        使用并查集将互相临近的路径段聚类成群组
+        
+        例如：如果 (path1, path2) 临近，(path2, path3) 临近
+        则 path1, path2, path3 应该聚类成一个群组
+        
+        返回: [merge_group1, merge_group2, ...]
+        """
+        if not pairwise_segments:
+            return []
+        
+        # 并查集数据结构
+        parent = {}
+        
+        def find(x):
+            if x not in parent:
+                parent[x] = x
+            if parent[x] != x:
+                parent[x] = find(parent[x])
+            return parent[x]
+        
+        def union(x, y):
+            root_x = find(x)
+            root_y = find(y)
+            if root_x != root_y:
+                parent[root_y] = root_x
+        
+        # 合并所有配对
+        for pair_key, seg_info in pairwise_segments.items():
+            path1_id = seg_info['path1_id']
+            path2_id = seg_info['path2_id']
+            union(path1_id, path2_id)
+        
+        # 将路径分组
+        groups = {}
+        for pair_key, seg_info in pairwise_segments.items():
+            path1_id = seg_info['path1_id']
+            path2_id = seg_info['path2_id']
+            root = find(path1_id)
+            
+            if root not in groups:
+                groups[root] = {
+                    'paths': {},  # {path_id: segment_indices}
+                    'distances': []
+                }
+            
+            # 添加路径及其段信息
+            groups[root]['paths'][path1_id] = seg_info['seg1']
+            groups[root]['paths'][path2_id] = seg_info['seg2']
+            groups[root]['distances'].append(seg_info['distance'])
+        
+        # 转换为最终格式，只保留包含2条或以上路径的群组
+        merge_groups = []
+        for root, group_data in groups.items():
+            if len(group_data['paths']) >= 2:
+                avg_distance = sum(group_data['distances']) / len(group_data['distances'])
+                merge_groups.append({
+                    'paths': list(group_data['paths'].items()),  # [(path_id, segment_indices), ...]
+                    'avg_distance': avg_distance,
+                    'path_count': len(group_data['paths'])
+                })
+        
+        return merge_groups
     
     def _find_adjacent_segments(self, path1, path1_id, path2, path2_id, threshold, min_length, max_length=5):
         """
@@ -1684,51 +1785,53 @@ class MTPRoutingModel:
         
         return total_distance / valid_pairs
     
-    def _execute_path_merging(self, mergeable_segments, max_merges=20):
+    def _execute_path_merging(self, merge_groups, max_merges=20):
         """
-        执行路径合并操作（优化版）
+        执行路径合并操作（聚类版本）
+        
+        参数:
+            merge_groups: 合并群组列表，每个群组包含多条互相临近的路径段
+            max_merges: 最大合并群组数量
         
         优化点：
         1. 减少日志输出
-        2. 限制合并数量避免过度合并
-        3. 使用集合加速查找
+        2. 限制合并群组数量避免过度合并
+        3. 支持多条路径聚类合并
         
-        返回: 成功合并的段数
+        返回: (合并群组数量, 实际合并的路径段数量)
         """
-        merged_count = 0
-        merged_pairs = set()  # 优化：使用集合加速查找
+        if not merge_groups:
+            return 0, 0
         
-        # 按平均距离排序，优先合并距离最近的段
-        mergeable_segments.sort(key=lambda x: x[4])
+        # 按群组内路径数量排序（路径越多的群组优先级越高）
+        # 然后按平均距离排序（距离越近越优先）
+        merge_groups.sort(key=lambda x: (-x['path_count'], x['avg_distance']))
         
-        # 优化：限制最大合并数量，避免过度计算
-        max_merges = min(len(mergeable_segments), max_merges)
+        # 限制处理的群组数量
+        max_groups = min(len(merge_groups), max_merges)
         
-        for idx, (path1_id, seg1_indices, path2_id, seg2_indices, avg_dist) in enumerate(mergeable_segments):
-            if idx >= max_merges:  # 达到上限
-                break
-                
-            # 优化：使用集合快速检查
-            merge_key = tuple(sorted([path1_id, path2_id]))
-            if merge_key in merged_pairs:
-                continue
+        merged_group_count = 0
+        total_merged_paths = 0  # 用于能耗计算
+        
+        for group_idx, group in enumerate(merge_groups[:max_groups]):
+            path_count = len(group['paths'])
+            avg_distance = group['avg_distance']
             
-            # 简化ETX比较（使用固定值）
-            seg1_etx = 1.0
-            seg2_etx = 1.0
-            
-            primary_path_id = path1_id if seg1_etx <= seg2_etx else path2_id
-            primary_segment = seg1_indices if seg1_etx <= seg2_etx else seg2_indices
-            
-            # 记录合并（简化版，不实际修改树）
-            self.merged_paths[merge_key] = {
-                'primary': (primary_path_id, primary_segment),
-                'avg_distance': avg_dist
+            # 记录这个合并群组
+            group_key = tuple(sorted([path_id for path_id, _ in group['paths']]))
+            self.merged_paths[group_key] = {
+                'paths': group['paths'],
+                'path_count': path_count,
+                'avg_distance': avg_distance
             }
-            merged_pairs.add(merge_key)
-            merged_count += 1
+            
+            # 统计：每个合并群组计为1次合并（用于显示）
+            merged_group_count += 1
+            
+            # 统计：n条路径段合并，实际节省(n-1)条路径的维护能耗
+            total_merged_paths += (path_count - 1)
         
-        return merged_count
+        return merged_group_count, total_merged_paths
     
     def _calculate_segment_etx(self, path_id, segment_indices):
         """

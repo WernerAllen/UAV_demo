@@ -46,7 +46,15 @@ class SimulationManager:
         self.last_uav_count = DEFAULT_NUM_UAVS
 
     def start_simulation(self, num_uavs=None):
-        random.seed(os.urandom(16))
+        # ## **** MODIFICATION START: 使用配置的随机种子 **** ##
+        from simulation_config import RANDOM_SEED_ENABLED, RANDOM_SEED
+        if RANDOM_SEED_ENABLED:
+            random.seed(RANDOM_SEED)
+            print(f"🎲 已启用固定随机种子: {RANDOM_SEED}")
+        else:
+            random.seed(os.urandom(16))
+            print("🎲 使用随机种子模式")
+        # ## **** MODIFICATION END **** ##
 
         if num_uavs is not None:
             self.last_uav_count = num_uavs

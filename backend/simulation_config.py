@@ -1,6 +1,26 @@
 # 文件: backend/simulation_config.py
 # 描述: 存放所有全局配置和仿真参数 (增加了方向持续时间配置)
 
+# ==================== 随机种子配置 ====================
+# 用于固定无人机分布和移动模式，降低测试误差，提高实验可重复性
+RANDOM_SEED_ENABLED = False  # 是否启用固定随机种子
+RANDOM_SEED = 24  # 随机种子值
+                  # 可选值：任意整数（如：42, 123, 2024等）
+                  
+# 使用说明：
+# 1. RANDOM_SEED_ENABLED = True: 每次实验使用相同的初始分布
+#    - 优点：实验结果可重复，便于对比不同协议/参数的性能差异
+#    - 适用：性能对比测试、参数调优
+# 2. RANDOM_SEED_ENABLED = False: 每次实验使用完全随机的分布
+#    - 优点：测试更广泛的场景，避免过拟合特定分布
+#    - 适用：鲁棒性测试、多场景验证
+# 
+# 影响范围：
+# - 无人机初始位置 (x, y, z坐标)
+# - 无人机初始飞行方向
+# - 无人机方向改变的时间点
+# - 所有协议中使用random的地方
+
 # 环境边界 (单位: 米)
 MAX_X = 600
 MAX_Y = 600
@@ -44,7 +64,7 @@ PTP_USE_RANDOM_PRR = True  # 是否使用随机PRR，True则使用随机值，Fa
 USE_PRR_FAILURE_MODEL = True
 
 # 路由模型选择: "DHYTP", "MTP", "PTP", "NONE"
-ROUTING_MODEL = "MTP"
+ROUTING_MODEL = "DHYTP"
 
 # 兼容性变量 - 基于ROUTING_MODEL自动设置
 USE_DHYTP_ROUTING_MODEL = ROUTING_MODEL == "DHYTP"
@@ -84,16 +104,16 @@ ENERGY_RETRANSMISSION_PENALTY = 1.5    # 重传能耗惩罚系数
 # 协议特定能耗配置
 PROTOCOL_ENERGY_CONFIG = {
     "PTP": {
-        # PTP协议不需要额外的能耗计算
+        "ROUTE_DISCOVERY": 0.8,        # 每次路由发现的能耗/数据包（点对点路径计算）
     },
     "MTP": {
         "TREE_CREATION": 1.5,          # 创建树结构的初始能耗/数据包
-        "TREE_MAINTENANCE": 0.05,        # 每次树维护操作的能耗/数据包
+        "TREE_MAINTENANCE": 0.5,       # 每次树维护操作的能耗
     },
     "DHYTP": {
         "TREE_CREATION": 1.0,          # 创建树结构的初始能耗/数据包
-        "TREE_MAINTENANCE": 0.05,        # 每次树维护操作的能耗/数据包
-        "PHASE_TRANSITION": 0.01,        # 从PTP阶段过渡到MTP阶段的能耗/数据包
+        "TREE_MAINTENANCE": 0.5,       # 每次树维护操作的能耗（与MTP保持一致）
+        "PHASE_TRANSITION": 0.01,       # 从PTP阶段过渡到MTP阶段的能耗/数据包
     }
 }
 
@@ -103,6 +123,9 @@ PROTOCOL_ENERGY_CONFIG = {
 # 2. 数据包接收能耗 = ENERGY_UNIT_RECEIVE (固定值)
 # 3. 重传能耗 = (传输能耗 * ENERGY_RETRANSMISSION_PENALTY)
 # 4. 协议操作能耗 = 对应协议操作的能耗值 (来自PROTOCOL_ENERGY_CONFIG)
+#    - PTP: 每个数据包需要ROUTE_DISCOVERY能耗（点对点路由发现）
+#    - MTP: 每个数据包需要TREE_CREATION能耗 + 分摊的TREE_MAINTENANCE能耗
+#    - DHYTP: 每个数据包需要TREE_CREATION + PHASE_TRANSITION能耗 + 分摊的TREE_MAINTENANCE能耗
 #
 # 总能耗计算方式:
 # - 每个数据包在Packet类中添加energy_consumed属性，记录传输过程中累积的能耗
@@ -125,11 +148,13 @@ PRUNING_UPDATE_INTERVAL = 0.4  # ETX更新间隔时间(秒)
 
 # 路径合并优化配置
 PATH_MERGE_ENABLED = True  # 是否启用路径合并优化（仅MTP协议）
-PATH_MERGE_DISTANCE_THRESHOLD = 20.0  # 相邻路径段的平均距离阈值(米)
-PATH_MERGE_MIN_SEGMENT_LENGTH = 2  # 可合并的最小路径段长度（跳数）
-PATH_MERGE_ENERGY_SAVING = 1  # 路径合并带来的能耗节省系数（相对于树维护能耗）
-PATH_MERGE_MAX_SEGMENT_LENGTH = 5  # 最大路径段长度（跳数），限制计算复杂度
+PATH_MERGE_DISTANCE_THRESHOLD = 30.0  # 相邻路径段的平均距离阈值(米)
+PATH_MERGE_MIN_SEGMENT_LENGTH = 1  # 可合并的最小路径段长度（跳数）
+PATH_MERGE_ENERGY_SAVING = 5  # 路径合并带来的能耗节省系数（相对于树维护能耗）
+PATH_MERGE_MAX_SEGMENT_LENGTH = 20  # 最大路径段长度（跳数），限制计算复杂度
 PATH_MERGE_MAX_MERGES = 20  # 最大合并数量，避免过度合并
+PATH_MERGE_AVERAGE_PATHS_PER_GROUP = 4.5  # 每个合并群组平均包含的路径段数量（用于能耗计算）
+                                          
 
 # - 仿真结束后计算: 总能耗 / 成功传输的数据包数 = 平均每包能耗
 
