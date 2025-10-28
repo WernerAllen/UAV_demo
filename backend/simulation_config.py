@@ -146,14 +146,29 @@ ELLIPSE_BOUNDARY_TOLERANCE = 4.0  # 椭圆边界容差(米)，用于判断节点
 PRUNING_UPDATE_INTERVAL = 0.4  # ETX更新间隔时间(秒)
                                # 0.3=高频 | 0.4=平衡 | 0.6=低频
 
+# 树剪枝能耗节省配置
+PRUNING_ENERGY_SAVING = 0.8  # 树剪枝带来的能耗节省比例（0-1之间）
+                             # 0.5=保守 | 0.8=平衡 | 0.95=激进
+                             # 计算方式：节省 = 剪枝率 × 基础能耗 × 节省比例
+                             # 注意：节省的能耗不会超过 (剪枝率 × 基础能耗)
+
 # 路径合并优化配置
-PATH_MERGE_ENABLED = True  # 是否启用路径合并优化（仅MTP协议）
+PATH_MERGE_ENABLED = True  # 是否启用路径合并优化
 PATH_MERGE_DISTANCE_THRESHOLD = 30.0  # 相邻路径段的平均距离阈值(米)
 PATH_MERGE_MIN_SEGMENT_LENGTH = 1  # 可合并的最小路径段长度（跳数）
-PATH_MERGE_ENERGY_SAVING = 5  # 路径合并带来的能耗节省系数（相对于树维护能耗）
+PATH_MERGE_ENERGY_SAVING = 0.5  # 路径合并带来的能耗节省系数（相对于树维护能耗）
 PATH_MERGE_MAX_SEGMENT_LENGTH = 20  # 最大路径段长度（跳数），限制计算复杂度
 PATH_MERGE_MAX_MERGES = 20  # 最大合并数量，避免过度合并
-PATH_MERGE_AVERAGE_PATHS_PER_GROUP = 4.5  # 每个合并群组平均包含的路径段数量（用于能耗计算）
+PATH_MERGE_AVERAGE_PATHS_PER_GROUP = 2.5  # 每个合并群组平均包含的路径段数量（用于能耗计算）
+
+# 群组数随机化配置（基于实验规模）
+PATH_MERGE_GROUP_COUNT_ENABLED = True  # 是否启用群组数随机化
+PATH_MERGE_GROUP_COUNT_UAV_RATIO_MIN = 0.05  # 群组数占UAV数的最小比例（群组/UAV）
+PATH_MERGE_GROUP_COUNT_UAV_RATIO_MAX = 0.1  # 群组数占UAV数的最大比例（群组/UAV）
+PATH_MERGE_GROUP_COUNT_PACKET_RATIO_MIN = 0.2  # 群组数占数据包数的最小比例（群组/包）
+PATH_MERGE_GROUP_COUNT_PACKET_RATIO_MAX = 1  # 群组数占数据包数的最大比例（群组/包）
+PATH_MERGE_GROUP_COUNT_WEIGHT_UAV = 0.6  # UAV数量的权重（0-1之间）
+PATH_MERGE_GROUP_COUNT_WEIGHT_PACKET = 0.4  # 数据包数量的权重（0-1之间）
                                           
 
 # - 仿真结束后计算: 总能耗 / 成功传输的数据包数 = 平均每包能耗

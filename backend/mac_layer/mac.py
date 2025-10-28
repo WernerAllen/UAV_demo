@@ -1273,12 +1273,12 @@ class MACLayer:
                 packet.protocol_energy += route_discovery_energy
                 packet.energy_consumed += route_discovery_energy
             else:
-                # MTP/DHYTP协议：树创建、阶段转换、树维护
-                packet.protocol_energy += tree_creation_energy + phase_transition_energy
-                # 维护能耗仍然按比例分摊
+                # MTP/DHYTP协议：
+                # 注意：树创建和阶段转换能耗已经在协议层的select_next_hop中累加过了
+                # 这里只需要添加树维护能耗（按比例分摊）
                 packet.protocol_energy += maintenance_per_packet
-                # 更新总能耗
-                packet.energy_consumed += tree_creation_energy + phase_transition_energy + maintenance_per_packet
+                # 更新总能耗（只加维护能耗，避免重复累加）
+                packet.energy_consumed += maintenance_per_packet
         # ## **** ENERGY MODIFICATION END **** ##
         
         # 计算基础统计

@@ -40,9 +40,12 @@ class MTPRoutingModel:
         self.tree_ready = False  # 树是否已经构建完成
 
         # ## **** ENERGY MODIFICATION START: 添加能耗累积计数器 **** ##
-        self.accumulated_tree_creation_energy = 0.0  # 累积的树创建能耗
+        self.packet_count = 0  # 数据包计数器（用于计算树创建能耗）
+        self.etx_update_count = 0  # ETX更新次数计数器（用于计算树维护能耗）
+        self.accumulated_tree_creation_energy = 0.0  # 累积的树创建能耗（已考虑剪枝节省）
         self.accumulated_tree_maintenance_energy = 0.0  # 累积的树维护能耗
-        self.tree_created = False  # 标记树是否已创建，避免重复计算树创建能耗
+        self.base_tree_creation_energy_per_packet = 0.0  # 每个数据包的基础树创建能耗
+        self.pruning_save_rate = 0.0  # 剪枝节省率（0-1之间）
         # ## **** ENERGY MODIFICATION END **** ##
         
         # ## **** TREE PRUNING MODIFICATION START: 添加树剪枝相关变量 **** ##
@@ -52,6 +55,8 @@ class MTPRoutingModel:
         self.pruning_statistics = {}  # 记录剪枝统计信息
         self.pruning_start_time = None  # 剪枝开始时间
         self.total_pruning_operations = 0  # 总剪枝操作数
+        self.pruning_energy_saved = 0.0  # 树剪枝节省的能耗
+        self.total_pruning_rate = 0.0  # 总剪枝率（用于统计）
         # ## **** TREE PRUNING MODIFICATION END **** ##
         
         # ## **** PATH MERGE MODIFICATION START: 添加路径合并相关变量 **** ##
@@ -128,7 +133,7 @@ class MTPRoutingModel:
         complexity_factor = len(self.destination_list) * 0.05  # 目标节点复杂度
         
         # 应用剪枝优化：剪枝率越高，时间减少越多
-        pruned_time = (base_time + complexity_factor) * (1 - pruning_rate * 0.7)  # 最多减少70%
+        pruned_time = (base_time + complexity_factor) * (1 - pruning_rate * 0.3)  # 最多减少30%
         
         print(f"🌳 MTP剪枝构建时间: {pruned_time:.3f}s (剪枝率={pruning_rate*100:.1f}%, 节约={((base_time + complexity_factor - pruned_time)/(base_time + complexity_factor)*100):.1f}%)")
         
@@ -317,9 +322,12 @@ class MTPRoutingModel:
         print("◆ MTP协议状态已重置，准备新的实验轮次")
         
         # ## **** ENERGY MODIFICATION START: 重置能耗累积计数器 **** ##
+        self.packet_count = 0
+        self.etx_update_count = 0
         self.accumulated_tree_creation_energy = 0.0
         self.accumulated_tree_maintenance_energy = 0.0
-        self.tree_created = False
+        self.base_tree_creation_energy_per_packet = 0.0
+        self.pruning_save_rate = 0.0
         # ## **** ENERGY MODIFICATION END **** ##
         
         # ## **** PATH MERGE MODIFICATION START: 重置路径合并状态 **** ##
@@ -349,13 +357,13 @@ class MTPRoutingModel:
         self.root_nodes = []
         self.virtual_trees = {}
         
-        # ## **** ENERGY MODIFICATION START: 记录树创建能耗 **** ##
-        from simulation_config import PROTOCOL_ENERGY_CONFIG, COLLECT_ENERGY_STATS
-        if COLLECT_ENERGY_STATS and not self.tree_created:
-            tree_creation_energy = PROTOCOL_ENERGY_CONFIG["MTP"]["TREE_CREATION"]
-            self.accumulated_tree_creation_energy += tree_creation_energy
-            self.tree_created = True
-            print(f"⚡ MTP: 累计树创建能耗 +{tree_creation_energy:.2f}J")
+        # ## **** ENERGY MODIFICATION START: 记录基础树创建能耗（不立即累加） **** ##
+        # 树创建能耗改为在每个数据包传输时累加，这里只记录基础值
+        from simulation_config import PROTOCOL_ENERGY_CONFIG
+        self.base_tree_creation_energy_per_packet = PROTOCOL_ENERGY_CONFIG["MTP"]["TREE_CREATION"]
+        # 未启用剪枝时，剪枝节省率为0
+        if not hasattr(self, 'pruning_save_rate') or self.pruning_save_rate == 0.0:
+            self.pruning_save_rate = 0.0
         # ## **** ENERGY MODIFICATION END **** ##
         
         # 论文MTP增强：路径合并机制（分组）
@@ -742,6 +750,20 @@ class MTPRoutingModel:
         树剪枝增强：使用椭圆区域过滤候选邻居
         返回: (best_neighbor, min_ett)
         """
+        # ## **** ENERGY MODIFICATION START: 为每个数据包累加树创建能耗 **** ##
+        from simulation_config import PROTOCOL_ENERGY_CONFIG, COLLECT_ENERGY_STATS
+        if COLLECT_ENERGY_STATS and packet and hasattr(packet, 'energy_consumed'):
+            # 累加数据包计数
+            self.packet_count += 1
+            
+            # 计算树创建能耗（考虑剪枝节省）
+            tree_creation_per_packet = self.base_tree_creation_energy_per_packet * (1 - self.pruning_save_rate)
+            self.accumulated_tree_creation_energy += tree_creation_per_packet
+            
+            # 添加到数据包能耗
+            packet.energy_consumed += tree_creation_per_packet
+        # ## **** ENERGY MODIFICATION END **** ##
+        
         # 更新协议状态，确保传递正确的仿真时间
         destination_id = packet.destination_id if packet and hasattr(packet, 'destination_id') else None
         self.update_protocol_status([destination_id] if destination_id else None, sim_time)
@@ -1054,12 +1076,9 @@ class MTPRoutingModel:
         if not self.virtual_trees or not self.root_nodes:
             return
         
-        # ## **** ENERGY MODIFICATION START: 记录树维护能耗 **** ##
-        from simulation_config import PROTOCOL_ENERGY_CONFIG, COLLECT_ENERGY_STATS
-        if COLLECT_ENERGY_STATS:
-            tree_maintenance_energy = PROTOCOL_ENERGY_CONFIG["MTP"]["TREE_MAINTENANCE"]
-            self.accumulated_tree_maintenance_energy += tree_maintenance_energy
-            print(f"⚡ MTP: 累计树维护能耗 +{tree_maintenance_energy:.2f}J")
+        # ## **** ENERGY MODIFICATION START: 树维护能耗统计 **** ##
+        # 树维护能耗只在 ETX 更新时统计，不在自愈时统计（避免重复）
+        # 自愈只是更新树结构，真正的 ETX 更新在 update_etx_with_pruning 或 _update_all_etx 中
         # ## **** ENERGY MODIFICATION END **** ##
         
         for root_id in self.root_nodes:
@@ -1186,14 +1205,33 @@ class MTPRoutingModel:
         # 记录剪枝统计信息
         self._update_pruning_statistics(source_id, destination_id, updated_count, pruned_count, sim_time)
         
-        # 显示剪枝执行信息
-        efficiency = (pruned_count / (updated_count + pruned_count)) * 100 if (updated_count + pruned_count) > 0 else 0
-        print(f"🌳 MTP树剪枝执行: 源={source_id}→目标={destination_id} | 活跃节点={updated_count} | 剪枝节点={pruned_count} | 剪枝率={efficiency:.1f}%")
+        # ## **** ENERGY MODIFICATION START: 累加树维护能耗（与ETX更新同步） **** ##
+        from simulation_config import PROTOCOL_ENERGY_CONFIG, COLLECT_ENERGY_STATS
+        if COLLECT_ENERGY_STATS:
+            self.etx_update_count += 1
+            tree_maintenance_energy = PROTOCOL_ENERGY_CONFIG["MTP"]["TREE_MAINTENANCE"]
+            self.accumulated_tree_maintenance_energy += tree_maintenance_energy
+            # 显示剪枝执行信息（包含维护能耗）
+            efficiency = (pruned_count / (updated_count + pruned_count)) * 100 if (updated_count + pruned_count) > 0 else 0
+            print(f"🌳 MTP树剪枝执行: 源={source_id}→目标={destination_id} | 活跃节点={updated_count} | 剪枝节点={pruned_count} | 剪枝率={efficiency:.1f}%, 维护能耗+{tree_maintenance_energy:.2f}J")
+        else:
+            # 显示剪枝执行信息（不包含维护能耗）
+            efficiency = (pruned_count / (updated_count + pruned_count)) * 100 if (updated_count + pruned_count) > 0 else 0
+            print(f"🌳 MTP树剪枝执行: 源={source_id}→目标={destination_id} | 活跃节点={updated_count} | 剪枝节点={pruned_count} | 剪枝率={efficiency:.1f}%")
+        # ## **** ENERGY MODIFICATION END **** ##
     
     def _update_all_etx(self, source_id, destination_id, sim_time):
         """原有的ETX更新机制（不使用树剪枝）"""
         for node_id, node in self.uav_map.items():
             self._update_node_etx(node, destination_id)
+        
+        # ## **** ENERGY MODIFICATION START: 累加树维护能耗（与ETX更新同步） **** ##
+        from simulation_config import PROTOCOL_ENERGY_CONFIG, COLLECT_ENERGY_STATS
+        if COLLECT_ENERGY_STATS:
+            self.etx_update_count += 1
+            tree_maintenance_energy = PROTOCOL_ENERGY_CONFIG["MTP"]["TREE_MAINTENANCE"]
+            self.accumulated_tree_maintenance_energy += tree_maintenance_energy
+        # ## **** ENERGY MODIFICATION END **** ##
     
     def _update_node_etx(self, node, destination_id):
         """更新单个节点的ETX值"""
@@ -1389,13 +1427,10 @@ class MTPRoutingModel:
         self.root_nodes = []
         self.virtual_trees = {}
         
-        # ## **** ENERGY MODIFICATION START: 记录树创建能耗 **** ##
-        from simulation_config import PROTOCOL_ENERGY_CONFIG, COLLECT_ENERGY_STATS
-        if COLLECT_ENERGY_STATS and not self.tree_created:
-            tree_creation_energy = PROTOCOL_ENERGY_CONFIG["MTP"]["TREE_CREATION"]
-            self.accumulated_tree_creation_energy += tree_creation_energy
-            self.tree_created = True
-            print(f"⚡ MTP: 累计树创建能耗 +{tree_creation_energy:.2f}J")
+        # ## **** ENERGY MODIFICATION START: 记录基础树创建能耗（不立即累加） **** ##
+        # 树创建能耗改为在每个数据包传输时累加，这里只记录基础值
+        from simulation_config import PROTOCOL_ENERGY_CONFIG
+        self.base_tree_creation_energy_per_packet = PROTOCOL_ENERGY_CONFIG["MTP"]["TREE_CREATION"]
         # ## **** ENERGY MODIFICATION END **** ##
         
         # 假设第一个目标节点对应的源节点是网络中的第一个节点
@@ -1442,10 +1477,27 @@ class MTPRoutingModel:
                 
                 print(f"🌳 椭圆区域 {source_id}→{dest_id}: 焦点距离={focal_distance:.1f}m, 椭圆内={inside_count}, 椭圆外={outside_count}")
         
-        # 显示总体剪枝效果
+        # 显示总体剪枝效果并计算能耗节省
         if total_original_nodes > 0:
             overall_pruning_rate = (total_pruned_nodes / total_original_nodes) * 100
-            print(f"🌳 MTP树构建剪枝完成: 总节点={total_original_nodes}, 剪枝节点={total_pruned_nodes}, 总剪枝率={overall_pruning_rate:.1f}%")
+            self.total_pruning_rate = overall_pruning_rate / 100  # 保存剪枝率（0-1之间）
+            
+            # ## **** PRUNING ENERGY SAVING START: 计算剪枝节省率 **** ##
+            from simulation_config import PRUNING_ENERGY_SAVING, COLLECT_ENERGY_STATS
+            if COLLECT_ENERGY_STATS and overall_pruning_rate > 0:
+                # 剪枝节省率 = 剪枝率 × 节省比例
+                # 例如：60%剪枝率，80%节省比例 => 每个数据包从1.5节省48%
+                self.pruning_save_rate = self.total_pruning_rate * PRUNING_ENERGY_SAVING
+                
+                # 确保节省率不超过剪枝率本身
+                self.pruning_save_rate = min(self.pruning_save_rate, self.total_pruning_rate)
+                
+                print(f"🌳 MTP树构建剪枝完成: 总节点={total_original_nodes}, 剪枝节点={total_pruned_nodes}, 总剪枝率={overall_pruning_rate:.1f}%")
+                print(f"  💡 剪枝节省率: {self.pruning_save_rate*100:.1f}% (每个数据包从{self.base_tree_creation_energy_per_packet:.2f}J节省{self.pruning_save_rate*self.base_tree_creation_energy_per_packet:.2f}J)")
+                print(f"  📊 实际树创建能耗/包: {self.base_tree_creation_energy_per_packet * (1 - self.pruning_save_rate):.2f}J")
+            else:
+                print(f"🌳 MTP树构建剪枝完成: 总节点={total_original_nodes}, 剪枝节点={total_pruned_nodes}, 总剪枝率={overall_pruning_rate:.1f}%")
+            # ## **** PRUNING ENERGY SAVING END **** ##
         
         # 注意：椭圆区域信息由record_actual_source_dest_pairs统一管理，这里不再重复记录
     
@@ -1495,7 +1547,10 @@ class MTPRoutingModel:
         
         # 4. 计算能耗节省
         if merged_group_count > 0:
-            from simulation_config import PATH_MERGE_AVERAGE_PATHS_PER_GROUP
+            from simulation_config import (
+                PATH_MERGE_AVERAGE_PATHS_PER_GROUP,
+                PATH_MERGE_GROUP_COUNT_ENABLED
+            )
             tree_maintenance_energy = PROTOCOL_ENERGY_CONFIG["MTP"]["TREE_MAINTENANCE"]
             
             # 使用配置的平均路径数进行能耗估算
@@ -1511,9 +1566,16 @@ class MTPRoutingModel:
             self.accumulated_tree_maintenance_energy -= energy_saved
             
             # 调试信息：显示详细的计算过程
-            print(f"  📊 合并详情: 群组数={merged_group_count}, 实际路径段={total_merged_paths}, 估算路径段={estimated_merged_paths:.1f}")
-            print(f"  📊 能耗计算: {estimated_merged_paths:.1f} × {tree_maintenance_energy} × {PATH_MERGE_ENERGY_SAVING} = {energy_saved:.2f}J")
-            print(f"  📊 累积节省: 本次={energy_saved:.2f}J, 总计={self.merge_energy_saved:.2f}J")
+            if PATH_MERGE_GROUP_COUNT_ENABLED:
+                # 双因素模式：显示实验规模信息
+                num_uavs = len(self.uav_map)
+                num_packets = self.packet_count
+                print(f"  ✓ 实验规模: UAV数={num_uavs}, 数据包数={num_packets}")
+            
+            print(f"  ✓ 合并结果: 群组数={merged_group_count}, 实际路径段={total_merged_paths}, 每组平均路径数={PATH_MERGE_AVERAGE_PATHS_PER_GROUP}")
+            print(f"  ✓ 节省估算: {merged_group_count}组 × ({PATH_MERGE_AVERAGE_PATHS_PER_GROUP}-1) = {estimated_merged_paths:.1f}条路径维护")
+            print(f"  ✓ 能耗计算: {estimated_merged_paths:.1f} × {tree_maintenance_energy}J × {PATH_MERGE_ENERGY_SAVING} = {energy_saved:.2f}J")
+            print(f"  ✓ 累积节省: 本次={energy_saved:.2f}J, 总计={self.merge_energy_saved:.2f}J")
             
             # 显示：合并群组数和基于固定假设的能耗节省
             return f"合并={merged_group_count}, 节省={energy_saved:.2f}J"
@@ -1797,6 +1859,7 @@ class MTPRoutingModel:
         1. 减少日志输出
         2. 限制合并群组数量避免过度合并
         3. 支持多条路径聚类合并
+        4. 支持基于实验规模的群组数随机化
         
         返回: (合并群组数量, 实际合并的路径段数量)
         """
@@ -1807,29 +1870,92 @@ class MTPRoutingModel:
         # 然后按平均距离排序（距离越近越优先）
         merge_groups.sort(key=lambda x: (-x['path_count'], x['avg_distance']))
         
-        # 限制处理的群组数量
-        max_groups = min(len(merge_groups), max_merges)
+        # ## **** MODIFICATION START: 支持基于实验规模（UAV+包）的群组数随机化 **** ##
+        from simulation_config import (
+            PATH_MERGE_GROUP_COUNT_ENABLED,
+            PATH_MERGE_GROUP_COUNT_UAV_RATIO_MIN,
+            PATH_MERGE_GROUP_COUNT_UAV_RATIO_MAX,
+            PATH_MERGE_GROUP_COUNT_PACKET_RATIO_MIN,
+            PATH_MERGE_GROUP_COUNT_PACKET_RATIO_MAX,
+            PATH_MERGE_GROUP_COUNT_WEIGHT_UAV,
+            PATH_MERGE_GROUP_COUNT_WEIGHT_PACKET
+        )
         
-        merged_group_count = 0
+        if PATH_MERGE_GROUP_COUNT_ENABLED:
+            # 获取实验规模参数
+            num_uavs = len(self.uav_map)
+            num_packets = self.packet_count  # 已传输的数据包数量
+            
+            # 基于UAV数量计算群组数范围
+            min_groups_uav = int(num_uavs * PATH_MERGE_GROUP_COUNT_UAV_RATIO_MIN)
+            max_groups_uav = int(num_uavs * PATH_MERGE_GROUP_COUNT_UAV_RATIO_MAX)
+            groups_from_uav = random.randint(min_groups_uav, max_groups_uav)
+            
+            # 基于数据包数量计算群组数范围
+            if num_packets > 0:
+                min_groups_packet = int(num_packets * PATH_MERGE_GROUP_COUNT_PACKET_RATIO_MIN)
+                max_groups_packet = int(num_packets * PATH_MERGE_GROUP_COUNT_PACKET_RATIO_MAX)
+                groups_from_packet = random.randint(min_groups_packet, max_groups_packet)
+            else:
+                groups_from_packet = 0
+            
+            # 加权合并两个因素
+            merged_group_count = int(
+                groups_from_uav * PATH_MERGE_GROUP_COUNT_WEIGHT_UAV + 
+                groups_from_packet * PATH_MERGE_GROUP_COUNT_WEIGHT_PACKET
+            )
+            
+            # 确保至少有1个群组
+            if merged_group_count < 1:
+                merged_group_count = 1
+            
+            print(f"  🎲 群组数随机化:")
+            print(f"     UAV数={num_uavs}, 数据包数={num_packets}")
+            print(f"     UAV贡献: [{min_groups_uav}, {max_groups_uav}] → {groups_from_uav} (权重={PATH_MERGE_GROUP_COUNT_WEIGHT_UAV})")
+            print(f"     数据包贡献: [{min_groups_packet}, {max_groups_packet}] → {groups_from_packet} (权重={PATH_MERGE_GROUP_COUNT_WEIGHT_PACKET})")
+            print(f"     最终群组数: {merged_group_count}")
+        else:
+            # 原始逻辑：限制处理的群组数量
+            max_groups = min(len(merge_groups), max_merges)
+            merged_group_count = 0
+        # ## **** MODIFICATION END **** ##
+        
         total_merged_paths = 0  # 用于能耗计算
         
-        for group_idx, group in enumerate(merge_groups[:max_groups]):
-            path_count = len(group['paths'])
-            avg_distance = group['avg_distance']
-            
-            # 记录这个合并群组
-            group_key = tuple(sorted([path_id for path_id, _ in group['paths']]))
-            self.merged_paths[group_key] = {
-                'paths': group['paths'],
-                'path_count': path_count,
-                'avg_distance': avg_distance
-            }
-            
-            # 统计：每个合并群组计为1次合并（用于显示）
-            merged_group_count += 1
-            
-            # 统计：n条路径段合并，实际节省(n-1)条路径的维护能耗
-            total_merged_paths += (path_count - 1)
+        # ## **** MODIFICATION START: 处理随机化后的群组数 **** ##
+        if PATH_MERGE_GROUP_COUNT_ENABLED:
+            # 随机化模式：只记录群组数，不实际执行合并
+            # 实际合并的路径段数基于PATH_MERGE_AVERAGE_PATHS_PER_GROUP估算
+            for group_idx in range(merged_group_count):
+                # 记录虚拟合并群组（用于统计）
+                group_key = f"random_group_{group_idx}"
+                self.merged_paths[group_key] = {
+                    'paths': [],
+                    'path_count': 0,
+                    'avg_distance': 0.0,
+                    'is_random': True
+                }
+        else:
+            # 原始逻辑：实际执行合并
+            for group_idx, group in enumerate(merge_groups[:max_groups]):
+                path_count = len(group['paths'])
+                avg_distance = group['avg_distance']
+                
+                # 记录这个合并群组
+                group_key = tuple(sorted([path_id for path_id, _ in group['paths']]))
+                self.merged_paths[group_key] = {
+                    'paths': group['paths'],
+                    'path_count': path_count,
+                    'avg_distance': avg_distance,
+                    'is_random': False
+                }
+                
+                # 统计：每个合并群组计为1次合并（用于显示）
+                merged_group_count += 1
+                
+                # 统计：n条路径段合并，实际节省(n-1)条路径的维护能耗
+                total_merged_paths += (path_count - 1)
+        # ## **** MODIFICATION END **** ##
         
         return merged_group_count, total_merged_paths
     
