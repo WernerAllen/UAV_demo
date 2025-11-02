@@ -21,6 +21,39 @@ def safe_float(val):
         return 0.0
 
 
+# ## **** 稳定性指标计算函数 **** ##
+def calculate_std_dev(values):
+    """计算标准差 σ = √(Σ(xi-μ)²/n)"""
+    if not values or len(values) == 0:
+        return 0.0
+    mean = sum(values) / len(values)
+    variance = sum((x - mean) ** 2 for x in values) / len(values)
+    return math.sqrt(variance)
+
+
+def calculate_cv(values):
+    """计算变异系数 CV = σ/μ"""
+    if not values or len(values) == 0:
+        return 0.0
+    mean = sum(values) / len(values)
+    if mean == 0:
+        return 0.0
+    std_dev = calculate_std_dev(values)
+    return std_dev / mean
+
+
+def get_cv_stability_level(cv):
+    """根据CV值返回稳定性等级"""
+    if cv < 0.1:
+        return "非常稳定"
+    elif cv < 0.3:
+        return "稳定"
+    elif cv < 0.5:
+        return "中等波动"
+    else:
+        return "不稳定"
+
+
 class ExperimentManager:
     def __init__(self):
         self.sim_manager = SimulationManager()
@@ -45,6 +78,11 @@ class ExperimentManager:
         self.average_energy = 0.0
         self.total_delivered_packets = 0  # 添加成功传输的数据包计数器
         # ## **** ENERGY MODIFICATION END **** ##
+        # ## **** STABILITY MODIFICATION START: 添加稳定性指标相关变量 **** ##
+        self.per_round_delivery_times = []  # 每轮的最大送达时间
+        self.per_round_aoi = []  # 每轮的平均AoI
+        self.per_round_energy = []  # 每轮的平均能耗
+        # ## **** STABILITY MODIFICATION END **** ##
 
     # ## **** MODIFICATION START: 改变接口以接收S-D对列表 **** ##
     def start_experiment(self, total_rounds, pairs_data, num_uavs):
@@ -91,6 +129,11 @@ class ExperimentManager:
         self.average_energy = 0.0
         self.total_delivered_packets = 0  # 重置成功传输的数据包计数器
         # ## **** ENERGY MODIFICATION END **** ##
+        # ## **** STABILITY MODIFICATION START: 重置稳定性指标 **** ##
+        self.per_round_delivery_times = []
+        self.per_round_aoi = []
+        self.per_round_energy = []
+        # ## **** STABILITY MODIFICATION END **** ##
         while valid_rounds < total_rounds:
             round_aborted = False  # 标记本轮是否异常终止
             round_index += 1
@@ -200,8 +243,13 @@ class ExperimentManager:
                         
                         self.total_delivery_time += max_delivery_time_this_round
                         
+                        # ## **** STABILITY MODIFICATION START: 记录本轮送达时间 **** ##
+                        self.per_round_delivery_times.append(max_delivery_time_this_round)
+                        # ## **** STABILITY MODIFICATION END **** ##
+                        
                         # ## **** AoI MODIFICATION START: 更新AoI统计 **** ##
                         # 从MAC层获取本轮AoI统计
+                        round_avg_aoi = 0.0
                         if hasattr(self.sim_manager.mac_layer, 'total_aoi'):
                             round_total_aoi = self.sim_manager.mac_layer.total_aoi
                             delivered_packets_this_round = sum(1 for pkt in packets_this_round if pkt.status == "delivered")
@@ -210,9 +258,15 @@ class ExperimentManager:
                             if delivered_packets_this_round > 0:
                                 round_avg_aoi = round_total_aoi / delivered_packets_this_round
                                 self.total_aoi += round_avg_aoi  # 累加每轮平均AoI
+                        
+                        # ## **** STABILITY MODIFICATION START: 记录本轮AoI **** ##
+                        self.per_round_aoi.append(round_avg_aoi)
+                        # ## **** STABILITY MODIFICATION END **** ##
+                        # ## **** AoI MODIFICATION END **** ##
                                 
                         # ## **** ENERGY MODIFICATION START: 更新能耗统计 **** ##
                         # 直接从MAC层获取本轮能耗统计结果
+                        round_avg_energy = 0.0
                         energy_stats = self.sim_manager.get_energy_statistics()
                         if energy_stats and "total_energy" in energy_stats:
                             round_total_energy = energy_stats["total_energy"]
@@ -224,8 +278,11 @@ class ExperimentManager:
                             if delivered_packets_this_round > 0:
                                 # 累加本轮总能耗，而不是平均能耗
                                 self.total_energy += round_total_energy
+                        
+                        # ## **** STABILITY MODIFICATION START: 记录本轮能耗 **** ##
+                        self.per_round_energy.append(round_avg_energy)
+                        # ## **** STABILITY MODIFICATION END **** ##
                         # ## **** ENERGY MODIFICATION END **** ##
-                        # ## **** AoI MODIFICATION END **** ##
                         
                         valid_rounds += 1
                         self.average_delivery_time = self.total_delivery_time / valid_rounds if valid_rounds > 0 else 0.0
@@ -307,6 +364,20 @@ class ExperimentManager:
     # ## **** MODIFICATION START: 在状态中增加当前路径信息 **** ##
     def get_status(self):
         with self.simulation_lock:
+            # ## **** STABILITY MODIFICATION START: 计算稳定性指标 **** ##
+            delivery_time_std = calculate_std_dev(self.per_round_delivery_times)
+            delivery_time_cv = calculate_cv(self.per_round_delivery_times)
+            delivery_time_stability = get_cv_stability_level(delivery_time_cv)
+            
+            aoi_std = calculate_std_dev(self.per_round_aoi)
+            aoi_cv = calculate_cv(self.per_round_aoi)
+            aoi_stability = get_cv_stability_level(aoi_cv)
+            
+            energy_std = calculate_std_dev(self.per_round_energy)
+            energy_cv = calculate_cv(self.per_round_energy)
+            energy_stability = get_cv_stability_level(energy_cv)
+            # ## **** STABILITY MODIFICATION END **** ##
+            
             status = {
                 "is_running": self.is_running,
                 "total_rounds_to_run": self.total_rounds_to_run,
@@ -321,6 +392,25 @@ class ExperimentManager:
                 "total_energy": getattr(self, 'total_energy', 0.0),
                 "average_energy": getattr(self, 'average_energy', 0.0),
                 # ## **** ENERGY MODIFICATION END **** ##
+                # ## **** STABILITY MODIFICATION START: 添加稳定性指标 **** ##
+                "stability": {
+                    "delivery_time": {
+                        "std_dev": delivery_time_std,
+                        "cv": delivery_time_cv,
+                        "level": delivery_time_stability
+                    },
+                    "aoi": {
+                        "std_dev": aoi_std,
+                        "cv": aoi_cv,
+                        "level": aoi_stability
+                    },
+                    "energy": {
+                        "std_dev": energy_std,
+                        "cv": energy_cv,
+                        "level": energy_stability
+                    }
+                },
+                # ## **** STABILITY MODIFICATION END **** ##
                 "message": self.current_status_message,
                 "current_paths": self.current_round_paths, # 新增字段
                 "final_paths": [

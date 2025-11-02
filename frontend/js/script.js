@@ -1268,6 +1268,9 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('expTotalEnergy').textContent = (statusData.total_energy || 0).toFixed(2);
             document.getElementById('expAvgEnergy').textContent = (statusData.average_energy || 0).toFixed(2);
             // ## **** ENERGY MODIFICATION END **** ##
+            // ## **** STABILITY MODIFICATION START: 更新稳定性指标显示 **** ##
+            updateStabilityDisplay(statusData.stability);
+            // ## **** STABILITY MODIFICATION END **** ##
         }
         
         if (statusData.completed_rounds > previousExperimentStatus.completed_rounds) {
@@ -1335,6 +1338,49 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
     }
+
+    // ## **** STABILITY MODIFICATION START: 添加稳定性指标显示函数 **** ##
+    function updateStabilityDisplay(stabilityData) {
+        if (!stabilityData) {
+            // 如果没有稳定性数据，重置显示
+            ['dt', 'aoi', 'energy'].forEach(metric => {
+                document.getElementById(`stability_${metric}_std`).textContent = '-';
+                document.getElementById(`stability_${metric}_cv`).textContent = '-';
+                const levelEl = document.getElementById(`stability_${metric}_level`);
+                levelEl.textContent = '-';
+                levelEl.removeAttribute('data-level');
+            });
+            return;
+        }
+        
+        // 更新送达时间稳定性
+        if (stabilityData.delivery_time) {
+            document.getElementById('stability_dt_std').textContent = stabilityData.delivery_time.std_dev.toFixed(4);
+            document.getElementById('stability_dt_cv').textContent = (stabilityData.delivery_time.cv * 100).toFixed(2) + '%';
+            const dtLevelEl = document.getElementById('stability_dt_level');
+            dtLevelEl.textContent = stabilityData.delivery_time.level;
+            dtLevelEl.setAttribute('data-level', stabilityData.delivery_time.level);
+        }
+        
+        // 更新AoI稳定性
+        if (stabilityData.aoi) {
+            document.getElementById('stability_aoi_std').textContent = stabilityData.aoi.std_dev.toFixed(4);
+            document.getElementById('stability_aoi_cv').textContent = (stabilityData.aoi.cv * 100).toFixed(2) + '%';
+            const aoiLevelEl = document.getElementById('stability_aoi_level');
+            aoiLevelEl.textContent = stabilityData.aoi.level;
+            aoiLevelEl.setAttribute('data-level', stabilityData.aoi.level);
+        }
+        
+        // 更新能耗稳定性
+        if (stabilityData.energy) {
+            document.getElementById('stability_energy_std').textContent = stabilityData.energy.std_dev.toFixed(4);
+            document.getElementById('stability_energy_cv').textContent = (stabilityData.energy.cv * 100).toFixed(2) + '%';
+            const energyLevelEl = document.getElementById('stability_energy_level');
+            energyLevelEl.textContent = stabilityData.energy.level;
+            energyLevelEl.setAttribute('data-level', stabilityData.energy.level);
+        }
+    }
+    // ## **** STABILITY MODIFICATION END **** ##
 
     function stopExperimentPolling(finalMessage) {
         if (experimentPollingInterval) { clearInterval(experimentPollingInterval); experimentPollingInterval = null; }

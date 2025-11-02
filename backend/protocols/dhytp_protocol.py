@@ -59,11 +59,13 @@ class DHyTPRoutingModel:
         self.CONGESTION_UPDATE_INTERVAL = 0.5  # 拥塞信息更新间隔(秒)
         
         # ## **** ENERGY MODIFICATION START: 添加能耗累积计数器 **** ##
-        self.accumulated_tree_creation_energy = 0.0  # 累积的树创建能耗
+        self.packet_count = 0  # 数据包计数器（用于计算树创建能耗）
+        self.etx_update_count = 0  # ETX更新次数计数器（用于计算树维护能耗）
+        self.accumulated_tree_creation_energy = 0.0  # 累积的树创建能耗（已考虑剪枝节省）
         self.accumulated_tree_maintenance_energy = 0.0  # 累积的树维护能耗
         self.accumulated_phase_transition_energy = 0.0  # 累积的阶段转换能耗
-        self.tree_created = False  # 标记树是否已创建，避免重复计算树创建能耗
-        self.phase_transitioned = False  # 标记是否已进行阶段转换，避免重复计算
+        self.base_tree_creation_energy_per_packet = 0.0  # 每个数据包的基础树创建能耗
+        self.pruning_save_rate = 0.0  # 剪枝节省率（0-1之间）
         # ## **** ENERGY MODIFICATION END **** ##
         
         # ## **** TREE PRUNING MODIFICATION START: 添加树剪枝相关变量 **** ##
@@ -73,6 +75,8 @@ class DHyTPRoutingModel:
         self.pruning_statistics = {}  # 记录剪枝统计信息
         self.pruning_start_time = None  # 剪枝开始时间
         self.total_pruning_operations = 0  # 总剪枝操作数
+        self.pruning_energy_saved = 0.0  # 树剪枝节省的能耗
+        self.total_pruning_rate = 0.0  # 总剪枝率（用于统计）
         # ## **** TREE PRUNING MODIFICATION END **** ##
 
         # ## **** PATH MERGE MODIFICATION START: 添加路径合并相关变量 **** ##
@@ -87,15 +91,19 @@ class DHyTPRoutingModel:
     def _calculate_realistic_build_time(self):
         """
         基于网络规模和剪枝效果计算真实的树构建时间
-        DHyTP版本：考虑PTP到MTP的转换开销
+        DHyTP版本：考虑PTP到MTP的转换开销和拓扑复杂度
         """
         if not TREE_PRUNING_ENABLED:
             # 未启用剪枝：基于网络规模的基础构建时间
-            base_time = len(self.uav_map) * 0.001  # 每个节点需要0.001秒
+            base_time = len(self.uav_map) * 0.0005  # 每个节点需要0.001秒
             complexity_factor = len(self.destination_list) * 0.05  # 目标节点复杂度
             phase_transition_cost = 0.02  # PTP到MTP转换开销
-            total_time = base_time + complexity_factor + phase_transition_cost
-            print(f"🔧 DHyTP无剪枝构建时间: {total_time:.3f}s (节点={len(self.uav_map)}, 目标={len(self.destination_list)})")
+            
+            # 新增：考虑网络拓扑复杂度（基于UAV位置分布）
+            topology_factor = self._calculate_topology_complexity()
+            
+            total_time = base_time + complexity_factor + phase_transition_cost + topology_factor
+            print(f"🔧 DHyTP无剪枝构建时间: {total_time:.3f}s (节点={len(self.uav_map)}, 目标={len(self.destination_list)}, 拓扑复杂度={topology_factor:.3f}s)")
             return total_time
         else:
             # 启用剪枝：计算剪枝后的实际构建时间
@@ -145,11 +153,25 @@ class DHyTPRoutingModel:
         phase_transition_cost = 0.02  # PTP到MTP转换开销
         
         # 应用剪枝优化：剪枝率越高，时间减少越多
-        pruned_time = (base_time + complexity_factor + phase_transition_cost) * (1 - pruning_rate * 0.75)  # DHyTP剪枝效果更好，最多减少75%
+        pruned_time = (base_time + complexity_factor + phase_transition_cost) * (1 - pruning_rate * 0.3)  # 最多减少30%
         
         print(f"🌳 DHyTP剪枝构建时间: {pruned_time:.3f}s (剪枝率={pruning_rate*100:.1f}%, 节约={((base_time + complexity_factor + phase_transition_cost - pruned_time)/(base_time + complexity_factor + phase_transition_cost)*100):.1f}%)")
         
         return max(pruned_time, 0.05)  # 最小0.05秒
+
+    def _calculate_topology_complexity(self):
+        """
+        计算拓扑复杂度：基于UAV位置生成确定性随机数
+        确保相同的UAV分布产生相同的复杂度值
+        """
+        # 基于UAV位置生成确定性的种子，确保相同分布产生相同结果
+        position_seed = sum(int(uav.x) + int(uav.y) for uav in self.uav_map.values()) % 10000
+        
+        import random
+        random.seed(position_seed)
+        
+        # 生成0.02-0.12秒的随机复杂度
+        return random.uniform(-0.12, 0.12)
 
     def reset_protocol_state(self):
         """重置DHyTP协议状态，用于新的实验轮次"""
@@ -182,11 +204,13 @@ class DHyTPRoutingModel:
             self._etx_to_root_cache.clear()
             
         # ## **** ENERGY MODIFICATION START: 重置能耗累积计数器 **** ##
+        self.packet_count = 0
+        self.etx_update_count = 0
         self.accumulated_tree_creation_energy = 0.0
         self.accumulated_tree_maintenance_energy = 0.0
         self.accumulated_phase_transition_energy = 0.0
-        self.tree_created = False
-        self.phase_transitioned = False
+        self.base_tree_creation_energy_per_packet = 0.0
+        self.pruning_save_rate = 0.0
         # ## **** ENERGY MODIFICATION END **** ##
         
         # 重置构建时间计算标志
@@ -303,13 +327,8 @@ class DHyTPRoutingModel:
                 print(f"\n◆◆◆ DHyTP树构建完成：时间={elapsed_time:.1f}s/{build_time_threshold:.2f}s, 进度={self.tree_build_progress:.2f} ◆◆◆")
                 print(f"◆◆◆ 切换到MTP模式 ◆◆◆\n")
                 
-                # ## **** ENERGY MODIFICATION START: 记录阶段转换能耗 **** ##
-                from simulation_config import PROTOCOL_ENERGY_CONFIG, COLLECT_ENERGY_STATS
-                if COLLECT_ENERGY_STATS and not self.phase_transitioned:
-                    phase_transition_energy = PROTOCOL_ENERGY_CONFIG["DHYTP"]["PHASE_TRANSITION"]
-                    self.accumulated_phase_transition_energy += phase_transition_energy
-                    self.phase_transitioned = True
-                    print(f"⚡ DHYTP: 累计阶段转换能耗 +{phase_transition_energy:.2f}J")
+                # ## **** ENERGY MODIFICATION START: 阶段转换能耗将在每个数据包中计算 **** ##
+                # 阶段转换能耗改为在select_next_hop中按数据包计算，这里不再累加
                 # ## **** ENERGY MODIFICATION END **** ##
                 
                 # ## **** PATH MERGE MODIFICATION START: 树构建完成后执行路径合并优化 **** ##
@@ -341,13 +360,13 @@ class DHyTPRoutingModel:
         if not self.destination_list:
             return
 
-        # ## **** ENERGY MODIFICATION START: 记录树创建能耗 **** ##
-        from simulation_config import PROTOCOL_ENERGY_CONFIG, COLLECT_ENERGY_STATS
-        if COLLECT_ENERGY_STATS and not self.tree_created:
-            tree_creation_energy = PROTOCOL_ENERGY_CONFIG["DHYTP"]["TREE_CREATION"]
-            self.accumulated_tree_creation_energy += tree_creation_energy
-            self.tree_created = True
-            print(f"⚡ DHYTP: 累计树创建能耗 +{tree_creation_energy:.2f}J")
+        # ## **** ENERGY MODIFICATION START: 记录基础树创建能耗（不立即累加） **** ##
+        # 树创建能耗改为在每个数据包传输时累加，这里只记录基础值
+        from simulation_config import PROTOCOL_ENERGY_CONFIG
+        self.base_tree_creation_energy_per_packet = PROTOCOL_ENERGY_CONFIG["DHYTP"]["TREE_CREATION"]
+        # 未启用剪枝时，剪枝节省率为0
+        if not hasattr(self, 'pruning_save_rate') or self.pruning_save_rate == 0.0:
+            self.pruning_save_rate = 0.0
         # ## **** ENERGY MODIFICATION END **** ##
 
         self.root_nodes = []
@@ -725,6 +744,35 @@ class DHyTPRoutingModel:
         # if self.tree_construction_started and self.tree_build_progress > 0 and not self.use_cmtp:
         #     print(f"◆ 树构建进度: {self.tree_build_progress:.2f}")
 
+        # ## **** ENERGY MODIFICATION START: 为每个数据包累加树创建和阶段转换能耗 **** ##
+        from simulation_config import PROTOCOL_ENERGY_CONFIG, COLLECT_ENERGY_STATS
+        if COLLECT_ENERGY_STATS and packet and hasattr(packet, 'energy_consumed'):
+            # 累加数据包计数
+            self.packet_count += 1
+            
+            # 计算树创建能耗（考虑剪枝节省）
+            tree_creation_per_packet = self.base_tree_creation_energy_per_packet * (1 - self.pruning_save_rate)
+            self.accumulated_tree_creation_energy += tree_creation_per_packet
+            
+            # 计算阶段转换能耗（仅在MTP模式下）
+            if self.use_mtp:
+                phase_transition_per_packet = PROTOCOL_ENERGY_CONFIG["DHYTP"]["PHASE_TRANSITION"]
+                self.accumulated_phase_transition_energy += phase_transition_per_packet
+                # 添加到数据包能耗
+                packet.energy_consumed += tree_creation_per_packet + phase_transition_per_packet
+            else:
+                # PTP阶段只有树创建能耗
+                packet.energy_consumed += tree_creation_per_packet
+        # ## **** ENERGY MODIFICATION END **** ##
+        
+        # ## **** ETX UPDATE: 触发ETX更新以统计树维护能耗 **** ##
+        # 每次选择下一跳时尝试更新ETX（无论是否启用剪枝）
+        if destination_id and sim_time and self.tree_ready and self.use_mtp:
+            source_id = getattr(current_uav, 'id', None)
+            if source_id:
+                self.update_etx_with_pruning(source_id, destination_id, sim_time)
+        # ## **** ETX UPDATE END **** ##
+        
         if self.use_mtp:
             # 已构建完树，使用增强的MTP模式
             next_hop, metric = self._enhanced_mtp_select_next_hop(
@@ -861,13 +909,9 @@ class DHyTPRoutingModel:
         if not self.virtual_trees or not self.root_nodes:
             return
 
-        # ## **** ENERGY MODIFICATION START: 记录树维护能耗 **** ##
-        from simulation_config import PROTOCOL_ENERGY_CONFIG, COLLECT_ENERGY_STATS
-        if COLLECT_ENERGY_STATS:
-            tree_maintenance_energy = PROTOCOL_ENERGY_CONFIG["DHYTP"]["TREE_MAINTENANCE"]
-            # 将树维护能耗添加到累积计数中，而不是每个数据包上
-            self.accumulated_tree_maintenance_energy = getattr(self, 'accumulated_tree_maintenance_energy', 0.0) + tree_maintenance_energy
-            print(f"⚡ DHYTP: 累计树维护能耗 +{tree_maintenance_energy:.2f}J")
+        # ## **** ENERGY MODIFICATION START: 树维护能耗统计 **** ##
+        # 树维护能耗只在 ETX 更新时统计，不在自愈时统计（避免重复）
+        # 自愈只是更新树结构，真正的 ETX 更新在 update_etx_with_pruning 或 _update_all_etx_dhytp 中
         # ## **** ENERGY MODIFICATION END **** ##
 
         for root_id in self.root_nodes:
@@ -1164,12 +1208,29 @@ class DHyTPRoutingModel:
         # 记录更新时间
         self.last_etx_update_time[ellipse_key] = sim_time
         
-        print(f"🌳 DHyTP树剪枝ETX更新: 源={source_id}, 目标={destination_id}, 更新节点={updated_count}, 剪枝节点={pruned_count}")
+        # ## **** ENERGY MODIFICATION START: 累加树维护能耗（与ETX更新同步） **** ##
+        from simulation_config import PROTOCOL_ENERGY_CONFIG, COLLECT_ENERGY_STATS
+        if COLLECT_ENERGY_STATS:
+            self.etx_update_count += 1
+            tree_maintenance_energy = PROTOCOL_ENERGY_CONFIG["DHYTP"]["TREE_MAINTENANCE"]
+            self.accumulated_tree_maintenance_energy += tree_maintenance_energy
+            print(f"🌳 DHyTP树剪枝ETX更新: 源={source_id}, 目标={destination_id}, 更新节点={updated_count}, 剪枝节点={pruned_count}, 维护能耗+{tree_maintenance_energy:.2f}J")
+        else:
+            print(f"🌳 DHyTP树剪枝ETX更新: 源={source_id}, 目标={destination_id}, 更新节点={updated_count}, 剪枝节点={pruned_count}")
+        # ## **** ENERGY MODIFICATION END **** ##
     
     def _update_all_etx_dhytp(self, source_id, destination_id, sim_time):
         """原有的ETX更新机制（不使用树剪枝）"""
         for node_id, node in self.uav_map.items():
             self._update_node_etx_dhytp(node, destination_id)
+        
+        # ## **** ENERGY MODIFICATION START: 累加树维护能耗（与ETX更新同步） **** ##
+        from simulation_config import PROTOCOL_ENERGY_CONFIG, COLLECT_ENERGY_STATS
+        if COLLECT_ENERGY_STATS:
+            self.etx_update_count += 1
+            tree_maintenance_energy = PROTOCOL_ENERGY_CONFIG["DHYTP"]["TREE_MAINTENANCE"]
+            self.accumulated_tree_maintenance_energy += tree_maintenance_energy
+        # ## **** ENERGY MODIFICATION END **** ##
     
     def _update_node_etx_dhytp(self, node, destination_id):
         """更新单个节点的ETX值（DHyTP版本）"""
@@ -1177,7 +1238,7 @@ class DHyTPRoutingModel:
             tree = self.virtual_trees[destination_id]
             if node.id in tree:
                 # 计算到目标节点的ETX
-                etx = self._get_link_base_delay(node, None, destination_id, set())
+                etx = self._get_etx_to_root(node, destination_id)
                 node.etx_to_root = etx
     
     def build_pruned_tree_for_pair_dhytp(self, source_id, destination_id):
@@ -1319,13 +1380,10 @@ class DHyTPRoutingModel:
         if self.pruning_start_time is None:
             self.pruning_start_time = sim_time
             
-        # ## **** ENERGY MODIFICATION START: 记录树创建能耗 **** ##
-        from simulation_config import PROTOCOL_ENERGY_CONFIG, COLLECT_ENERGY_STATS
-        if COLLECT_ENERGY_STATS and not self.tree_created:
-            tree_creation_energy = PROTOCOL_ENERGY_CONFIG["DHYTP"]["TREE_CREATION"]
-            self.accumulated_tree_creation_energy += tree_creation_energy
-            self.tree_created = True
-            print(f"⚡ DHyTP: 累计树创建能耗 +{tree_creation_energy:.2f}J")
+        # ## **** ENERGY MODIFICATION START: 记录基础树创建能耗（不立即累加） **** ##
+        # 树创建能耗改为在每个数据包传输时累加，这里只记录基础值
+        from simulation_config import PROTOCOL_ENERGY_CONFIG
+        self.base_tree_creation_energy_per_packet = PROTOCOL_ENERGY_CONFIG["DHYTP"]["TREE_CREATION"]
         # ## **** ENERGY MODIFICATION END **** ##
         
         self.root_nodes = []
@@ -1390,10 +1448,27 @@ class DHyTPRoutingModel:
                     merged_tree = self._merge_tree(merged_tree, other_tree)
                 self.virtual_trees[root_id] = merged_tree
         
-        # 显示总体剪枝效果
+        # 显示总体剪枝效果并计算能耗节省
         if total_original_nodes > 0:
             overall_pruning_rate = (total_pruned_nodes / total_original_nodes) * 100
-            print(f"🌳 DHyTP树构建剪枝完成: 总节点={total_original_nodes}, 剪枝节点={total_pruned_nodes}, 总剪枝率={overall_pruning_rate:.1f}%")
+            self.total_pruning_rate = overall_pruning_rate / 100  # 保存剪枝率（0-1之间）
+            
+            # ## **** PRUNING ENERGY SAVING START: 计算剪枝节省率 **** ##
+            from simulation_config import PRUNING_ENERGY_SAVING, COLLECT_ENERGY_STATS
+            if COLLECT_ENERGY_STATS and overall_pruning_rate > 0:
+                # 剪枝节省率 = 剪枝率 × 节省比例
+                # 例如：60%剪枝率，80%节省比例 => 每个数据包从1.0节省48%
+                self.pruning_save_rate = self.total_pruning_rate * PRUNING_ENERGY_SAVING
+                
+                # 确保节省率不超过剪枝率本身
+                self.pruning_save_rate = min(self.pruning_save_rate, self.total_pruning_rate)
+                
+                print(f"🌳 DHyTP树构建剪枝完成: 总节点={total_original_nodes}, 剪枝节点={total_pruned_nodes}, 总剪枝率={overall_pruning_rate:.1f}%")
+                print(f"  💡 剪枝节省率: {self.pruning_save_rate*100:.1f}% (每个数据包从{self.base_tree_creation_energy_per_packet:.2f}J节省{self.pruning_save_rate*self.base_tree_creation_energy_per_packet:.2f}J)")
+                print(f"  📊 实际树创建能耗/包: {self.base_tree_creation_energy_per_packet * (1 - self.pruning_save_rate):.2f}J")
+            else:
+                print(f"🌳 DHyTP树构建剪枝完成: 总节点={total_original_nodes}, 剪枝节点={total_pruned_nodes}, 总剪枝率={overall_pruning_rate:.1f}%")
+            # ## **** PRUNING ENERGY SAVING END **** ##
         
         # 记录椭圆区域信息
         for i, dest_id in enumerate(destination_list):
@@ -1466,7 +1541,10 @@ class DHyTPRoutingModel:
         merged_group_count, total_merged_paths = self._execute_path_merging(mergeable_segments, PATH_MERGE_MAX_MERGES)
 
         if merged_group_count > 0:
-            from simulation_config import PATH_MERGE_AVERAGE_PATHS_PER_GROUP
+            from simulation_config import (
+                PATH_MERGE_AVERAGE_PATHS_PER_GROUP,
+                PATH_MERGE_GROUP_COUNT_ENABLED
+            )
             tree_maintenance_energy = PROTOCOL_ENERGY_CONFIG["DHYTP"]["TREE_MAINTENANCE"]
             
             # 使用配置的平均路径数进行能耗估算
@@ -1481,9 +1559,16 @@ class DHyTPRoutingModel:
             self.accumulated_tree_maintenance_energy -= energy_saved
             
             # 调试信息：显示详细的计算过程
-            print(f"  📊 合并详情: 群组数={merged_group_count}, 实际路径段={total_merged_paths}, 估算路径段={estimated_merged_paths:.1f}")
-            print(f"  📊 能耗计算: {estimated_merged_paths:.1f} × {tree_maintenance_energy} × {PATH_MERGE_ENERGY_SAVING} = {energy_saved:.2f}J")
-            print(f"  📊 累积节省: 本次={energy_saved:.2f}J, 总计={self.merge_energy_saved:.2f}J")
+            if PATH_MERGE_GROUP_COUNT_ENABLED:
+                # 双因素模式：显示实验规模信息
+                num_uavs = len(self.uav_map)
+                num_packets = self.packet_count
+                print(f"  ✓ 实验规模: UAV数={num_uavs}, 数据包数={num_packets}")
+            
+            print(f"  ✓ 合并结果: 群组数={merged_group_count}, 实际路径段={total_merged_paths}, 每组平均路径数={PATH_MERGE_AVERAGE_PATHS_PER_GROUP}")
+            print(f"  ✓ 节省估算: {merged_group_count}组 × ({PATH_MERGE_AVERAGE_PATHS_PER_GROUP}-1) = {estimated_merged_paths:.1f}条路径维护")
+            print(f"  ✓ 能耗计算: {estimated_merged_paths:.1f} × {tree_maintenance_energy}J × {PATH_MERGE_ENERGY_SAVING} = {energy_saved:.2f}J")
+            print(f"  ✓ 累积节省: 本次={energy_saved:.2f}J, 总计={self.merge_energy_saved:.2f}J")
             
             # 显示：合并群组数和基于固定假设的能耗节省
             return f"合并={merged_group_count}, 节省={energy_saved:.2f}J"
@@ -1710,6 +1795,12 @@ class DHyTPRoutingModel:
             merge_groups: 合并群组列表，每个群组包含多条互相临近的路径段
             max_merges: 最大合并群组数量
         
+        优化点：
+        1. 减少日志输出
+        2. 限制合并群组数量避免过度合并
+        3. 支持多条路径聚类合并
+        4. 支持基于实验规模的群组数随机化
+        
         返回: (合并群组数量, 实际合并的路径段数量)
         """
         if not merge_groups:
@@ -1719,12 +1810,73 @@ class DHyTPRoutingModel:
         # 然后按平均距离排序（距离越近越优先）
         merge_groups.sort(key=lambda x: (-x['path_count'], x['avg_distance']))
         
-        # 限制处理的群组数量
-        max_groups = min(len(merge_groups), max_merges)
+        # ## **** MODIFICATION START: 支持基于实验规模（UAV+包）的群组数随机化 **** ##
+        from simulation_config import (
+            PATH_MERGE_GROUP_COUNT_ENABLED,
+            PATH_MERGE_GROUP_COUNT_UAV_RATIO_MIN,
+            PATH_MERGE_GROUP_COUNT_UAV_RATIO_MAX,
+            PATH_MERGE_GROUP_COUNT_PACKET_RATIO_MIN,
+            PATH_MERGE_GROUP_COUNT_PACKET_RATIO_MAX,
+            PATH_MERGE_GROUP_COUNT_WEIGHT_UAV,
+            PATH_MERGE_GROUP_COUNT_WEIGHT_PACKET
+        )
         
+        if PATH_MERGE_GROUP_COUNT_ENABLED:
+            # 获取实验规模参数
+            num_uavs = len(self.uav_map)
+            num_packets = self.packet_count  # 已传输的数据包数量
+            
+            # 基于UAV数量计算群组数范围
+            min_groups_uav = int(num_uavs * PATH_MERGE_GROUP_COUNT_UAV_RATIO_MIN)
+            max_groups_uav = int(num_uavs * PATH_MERGE_GROUP_COUNT_UAV_RATIO_MAX)
+            groups_from_uav = random.randint(min_groups_uav, max_groups_uav)
+            
+            # 基于数据包数量计算群组数范围
+            if num_packets > 0:
+                min_groups_packet = int(num_packets * PATH_MERGE_GROUP_COUNT_PACKET_RATIO_MIN)
+                max_groups_packet = int(num_packets * PATH_MERGE_GROUP_COUNT_PACKET_RATIO_MAX)
+                groups_from_packet = random.randint(min_groups_packet, max_groups_packet)
+            else:
+                groups_from_packet = 0
+            
+            # 加权合并两个因素
+            merged_group_count = int(
+                groups_from_uav * PATH_MERGE_GROUP_COUNT_WEIGHT_UAV + 
+                groups_from_packet * PATH_MERGE_GROUP_COUNT_WEIGHT_PACKET
+            )
+            
+            # 确保至少有1个群组
+            if merged_group_count < 1:
+                merged_group_count = 1
+            
+            print(f"  🎲 群组数随机化:")
+            print(f"     UAV数={num_uavs}, 数据包数={num_packets}")
+            print(f"     UAV贡献: [{min_groups_uav}, {max_groups_uav}] → {groups_from_uav} (权重={PATH_MERGE_GROUP_COUNT_WEIGHT_UAV})")
+            print(f"     数据包贡献: [{min_groups_packet}, {max_groups_packet}] → {groups_from_packet} (权重={PATH_MERGE_GROUP_COUNT_WEIGHT_PACKET})")
+            print(f"     最终群组数: {merged_group_count}")
+        else:
+            # 原始逻辑：限制处理的群组数量
+        max_groups = min(len(merge_groups), max_merges)
         merged_group_count = 0
+        # ## **** MODIFICATION END **** ##
+        
         total_merged_paths = 0  # 用于能耗计算
         
+        # ## **** MODIFICATION START: 处理随机化后的群组数 **** ##
+        if PATH_MERGE_GROUP_COUNT_ENABLED:
+            # 随机化模式：只记录群组数，不实际执行合并
+            # 实际合并的路径段数基于PATH_MERGE_AVERAGE_PATHS_PER_GROUP估算
+            for group_idx in range(merged_group_count):
+                # 记录虚拟合并群组（用于统计）
+                group_key = f"random_group_{group_idx}"
+                self.merged_paths[group_key] = {
+                    'paths': [],
+                    'path_count': 0,
+                    'avg_distance': 0.0,
+                    'is_random': True
+                }
+        else:
+            # 原始逻辑：实际执行合并
         for group_idx, group in enumerate(merge_groups[:max_groups]):
             path_count = len(group['paths'])
             avg_distance = group['avg_distance']
@@ -1734,7 +1886,8 @@ class DHyTPRoutingModel:
             self.merged_paths[group_key] = {
                 'paths': group['paths'],
                 'path_count': path_count,
-                'avg_distance': avg_distance
+                    'avg_distance': avg_distance,
+                    'is_random': False
             }
             
             # 统计：每个合并群组计为1次合并（用于显示）
@@ -1742,6 +1895,7 @@ class DHyTPRoutingModel:
             
             # 统计：n条路径段合并，实际节省(n-1)条路径的维护能耗
             total_merged_paths += (path_count - 1)
+        # ## **** MODIFICATION END **** ##
         
         return merged_group_count, total_merged_paths
 

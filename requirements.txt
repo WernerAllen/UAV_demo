@@ -6,5 +6,8 @@ flask-cors==4.0.0
 # 数值计算和科学计算
 numpy==1.24.3
 
+# 数据可视化（用于 graph.py）
+matplotlib>=3.7.0
+
 # 标准库（无需安装，但列出以供参考）
 # threading, time, math, random, collections, heapq, os, functools, logging, datetime, importlib
